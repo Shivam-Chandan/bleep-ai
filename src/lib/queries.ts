@@ -128,6 +128,9 @@ export async function deleteChat(
   userId: string,
   chatId: string
 ): Promise<void> {
+  // Remove messages explicitly; remote libSQL does not enforce the
+  // ON DELETE CASCADE foreign key by default.
+  await execute(`DELETE FROM messages WHERE chat_id = ?`, [chatId]);
   await execute(`DELETE FROM chats WHERE id = ? AND user_id = ?`, [
     chatId,
     userId,

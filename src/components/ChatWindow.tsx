@@ -41,13 +41,16 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     setError(null);
 
     addMessage(currentChatId, { role: 'user', content: userMessage });
-    const assistantMessage = addMessage(currentChatId, { role: 'assistant', content: '' });
 
+    // Build the request from history *before* adding the empty assistant
+    // placeholder, so the server sees the user message as the last turn.
     const chatHistory = getCurrentChat()?.messages || [];
     const formattedMessages = chatHistory.map((msg) => ({
       role: msg.role,
       content: msg.content,
     }));
+
+    const assistantMessage = addMessage(currentChatId, { role: 'assistant', content: '' });
 
     const streamResponse = async () => {
       const body: Record<string, unknown> = {

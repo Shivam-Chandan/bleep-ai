@@ -4,7 +4,12 @@ import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
 import { CLOUD_MODELS, DEFAULT_MODEL, LOCAL_MODEL, isCloudModel, type ChatModel } from '@/lib/models';
 import { openRouterChatUrl, openRouterConfigured, openRouterHeaders } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
-import { addMessage, userOwnsChat } from '@/lib/queries';
+import { addMessage, listMessages, updateChatTitle, userOwnsChat } from '@/lib/queries';
+
+function generateTitle(firstMessage: string): string {
+  const words = firstMessage.trim().split(/\s+/);
+  return words.slice(0, 6).join(' ') + (words.length > 6 ? '...' : '');
+}
 
 interface StreamDelta {
   content?: string;
@@ -124,11 +129,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
     }
 
-    // Persist the latest user message before calling the model.
+    // Persist the latest user message before calling the model. Look for the
+    // last user turn (the client may append an empty assistant placeholder),
+    // and skip if it was already saved — the client retries on 502/503/504.
     if (chatId) {
-      const last = messages[messages.length - 1];
-      if (last?.role === 'user') {
-        await addMessage(chatId, 'user', last.content);
+      const lastUser = [...messages]
+        .reverse()
+        .find((m) => m.role === 'user' && m.content?.trim());
+      if (lastUser) {
+        const existing = await listMessages(chatId);
+        const lastSavedUser = [...existing]
+          .reverse()
+          .find((m) => m.role === 'user');
+        const alreadySaved = lastSavedUser?.content === lastUser.content;
+        if (!alreadySaved) {
+          await addMessage(chatId, 'user', lastUser.content);
+          // Title the chat from its first message if it has none yet.
+          if (existing.length === 0) {
+            await updateChatTitle(auth.userId, chatId, generateTitle(lastUser.content));
+          }
+        }
       }
     }
 

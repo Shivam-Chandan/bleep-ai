@@ -115,7 +115,8 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   },
 
   deleteChat: async (id: string) => {
-    await fetch(`/api/chats/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/chats/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to delete chat');
     set((state) => ({
       chats: state.chats.filter((chat) => chat.id !== id),
       currentChatId: state.currentChatId === id ? null : state.currentChatId,

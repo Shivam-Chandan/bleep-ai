@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { OllamaRequest, OllamaResponse } from '@/lib/types';
+import { OLLAMA_BASE_URL, OLLAMA_MODEL, ollamaAuthHeader } from '@/lib/ollama';
 
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-const DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+const DEFAULT_MODEL = OLLAMA_MODEL;
 
 export async function POST(request: NextRequest) {
   try {
@@ -20,6 +20,7 @@ export async function POST(request: NextRequest) {
         content: msg.content,
       })),
       stream,
+      keep_alive: -1,
       options: {
         temperature: 0.7,
         top_p: 0.9,
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...ollamaAuthHeader(),
       },
       body: JSON.stringify(ollamaRequest),
     });
@@ -112,7 +114,9 @@ export async function POST(request: NextRequest) {
 
 export async function GET() {
   try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
+      headers: { ...ollamaAuthHeader() },
+    });
     if (!response.ok) {
       return NextResponse.json({ error: 'Failed to fetch models' }, { status: 500 });
     }

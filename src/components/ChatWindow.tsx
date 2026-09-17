@@ -39,13 +39,13 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     addMessage(currentChatId, { role: 'user', content: userMessage });
     const assistantMessage = addMessage(currentChatId, { role: 'assistant', content: '' });
 
-    try {
-      const chatHistory = getCurrentChat()?.messages || [];
-      const formattedMessages = chatHistory.map((msg) => ({
-        role: msg.role,
-        content: msg.content,
-      }));
+    const chatHistory = getCurrentChat()?.messages || [];
+    const formattedMessages = chatHistory.map((msg) => ({
+      role: msg.role,
+      content: msg.content,
+    }));
 
+    const streamResponse = async () => {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -53,7 +53,9 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       });
 
       if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+        const error = new Error(`API error: ${response.status}`) as Error & { status?: number };
+        error.status = response.status;
+        throw error;
       }
 
       const reader = response.body?.getReader();
@@ -85,9 +87,38 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
           }
         }
       }
+    };
+
+    const maxAttempts = 3;
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          await streamResponse();
+          setError(null);
+          break;
+        } catch (error) {
+          const status = (error as { status?: number }).status;
+          const retryable = status === undefined || status === 502 || status === 503 || status === 504;
+
+          if (retryable && attempt < maxAttempts) {
+            setError('Waking the local model, this can take up to a minute…');
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            continue;
+          }
+
+          throw error;
+        }
+      }
     } catch (error) {
       console.error('Send message error:', error);
-      setError(error instanceof Error ? error.message : 'Failed to send message');
+      const status = (error as { status?: number }).status;
+      setError(
+        status === 504
+          ? 'The local model took too long to wake up. Please try again.'
+          : error instanceof Error
+            ? error.message
+            : 'Failed to send message'
+      );
       setIsStreaming(false);
       setLoading(false);
     }

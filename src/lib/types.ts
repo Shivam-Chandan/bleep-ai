@@ -17,6 +17,7 @@ export interface OllamaRequest {
   model: string;
   messages: { role: string; content: string }[];
   stream: boolean;
+  keep_alive?: number | string;
   options?: {
     temperature?: number;
     top_p?: number;

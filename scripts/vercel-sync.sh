@@ -40,8 +40,10 @@ if ! $DRY_RUN; then
   : "${VERCEL_TOKEN:?VERCEL_TOKEN is required (set it in $CONFIG_FILE)}"
 fi
 
+team_query=""
+[ -n "${VERCEL_TEAM_ID:-}" ] && team_query="teamId=${VERCEL_TEAM_ID}"
 query="upsert=true"
-[ -n "${VERCEL_TEAM_ID:-}" ] && query="${query}&teamId=${VERCEL_TEAM_ID}"
+[ -n "$team_query" ] && query="${query}&${team_query}"
 
 upsert() {
   local key="$1" value="$2"
@@ -81,9 +83,20 @@ if $DEPLOY; then
       echo "[dry-run] would trigger deploy hook"
     else
       code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$VERCEL_DEPLOY_HOOK_URL")"
-      echo "Triggered redeploy (HTTP ${code})"
+      echo "Triggered redeploy via deploy hook (HTTP ${code})"
+    fi
+  elif [ -n "${VERCEL_GIT_REPO_ID:-}" ]; then
+    if $DRY_RUN; then
+      echo "[dry-run] would redeploy production from github ${VERCEL_GIT_REF:-main} (repoId ${VERCEL_GIT_REPO_ID})"
+    else
+      code="$(curl -s -o /tmp/vercel-deploy-response.json -w '%{http_code}' -X POST \
+        "${API_BASE}/v13/deployments?${team_query}&forceNew=1" \
+        -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"name\":\"${VERCEL_PROJECT}\",\"target\":\"production\",\"gitSource\":{\"type\":\"github\",\"ref\":\"${VERCEL_GIT_REF:-main}\",\"repoId\":${VERCEL_GIT_REPO_ID}}}")"
+      echo "Triggered redeploy via git source (HTTP ${code}): $(cat /tmp/vercel-deploy-response.json 2>/dev/null)"
     fi
   else
-    echo "VERCEL_DEPLOY_HOOK_URL not set; redeploy manually for env changes to apply"
+    echo "No VERCEL_DEPLOY_HOOK_URL or VERCEL_GIT_REPO_ID set; redeploy manually for env changes to apply"
   fi
 fi

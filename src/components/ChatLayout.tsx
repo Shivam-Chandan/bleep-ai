@@ -1,19 +1,33 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useChatStore } from '@/lib/store';
 import { ChatWindow } from './ChatWindow';
 import { ChatSidebar } from './ChatSidebar';
 
-export function ChatLayout() {
-  const { chats, createChat, getCurrentChat } = useChatStore();
+export function ChatLayout({ username }: { username?: string }) {
+  const { chats, isHydrated, loadChats, createChat, getCurrentChat } = useChatStore();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const router = useRouter();
 
+  // Load this user's chats from the database once.
   useEffect(() => {
-    if (chats.length === 0) {
-      createChat();
+    loadChats();
+  }, [loadChats]);
+
+  // After hydration, ensure there is at least one chat to show.
+  useEffect(() => {
+    if (isHydrated && chats.length === 0) {
+      createChat().catch(() => {});
     }
-  }, [chats.length, createChat]);
+  }, [isHydrated, chats.length, createChat]);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/login');
+    router.refresh();
+  };
 
   const currentChat = getCurrentChat();
   const title = currentChat?.title || 'Bleep AI';
@@ -22,7 +36,7 @@ export function ChatLayout() {
     <div className="flex h-dvh bg-background overflow-hidden">
       {/* Desktop sidebar (always visible) */}
       <aside className="hidden lg:flex w-72 flex-shrink-0">
-        <ChatSidebar />
+        <ChatSidebar username={username} onLogout={handleLogout} />
       </aside>
 
       {/* Mobile sidebar (slide-over drawer) */}
@@ -41,7 +55,7 @@ export function ChatLayout() {
             isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
           }`}
         >
-          <ChatSidebar onNavigate={() => setIsSidebarOpen(false)} />
+          <ChatSidebar username={username} onLogout={handleLogout} onNavigate={() => setIsSidebarOpen(false)} />
         </div>
       </div>
 
@@ -60,7 +74,7 @@ export function ChatLayout() {
           </button>
           <h1 className="flex-1 truncate font-semibold text-base">{title}</h1>
           <button
-            onClick={() => createChat()}
+            onClick={() => createChat().catch(() => {})}
             className="p-2 -mr-1 rounded-lg text-primary hover:bg-muted active:bg-muted transition-colors"
             aria-label="New chat"
           >

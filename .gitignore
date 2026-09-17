@@ -32,6 +32,12 @@ ollama.log
 .env*.local
 .env
 
+# sqlite database (per-machine, do not commit)
+/data/
+*.db
+*.db-shm
+*.db-wal
+
 # vercel
 .vercel
 

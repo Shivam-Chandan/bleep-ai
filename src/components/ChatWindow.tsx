@@ -49,7 +49,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: formattedMessages, stream: true }),
+        body: JSON.stringify({ messages: formattedMessages, stream: true, chatId: currentChatId }),
       });
 
       if (!response.ok) {

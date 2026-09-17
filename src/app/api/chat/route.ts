@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { OllamaRequest, OllamaResponse } from '@/lib/types';
 import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
-import { CLOUD_MODELS, DEFAULT_MODEL, isCloudModel, type ChatModel } from '@/lib/models';
+import { CLOUD_MODELS, DEFAULT_MODEL, LOCAL_MODEL, isCloudModel, type ChatModel } from '@/lib/models';
 import { openRouterChatUrl, openRouterConfigured, openRouterHeaders } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
 import { addMessage, userOwnsChat } from '@/lib/queries';
@@ -217,6 +217,8 @@ export async function GET() {
   if (auth instanceof NextResponse) return auth;
 
   try {
+    // Only expose the configured local model (OLLAMA_MODEL) in the picker,
+    // even though Ollama may have several models pulled.
     const localModels: ChatModel[] = [];
     try {
       const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
@@ -225,6 +227,7 @@ export async function GET() {
       if (response.ok) {
         const data = await response.json();
         for (const model of data.models || []) {
+          if (model.name !== LOCAL_MODEL) continue;
           localModels.push({
             id: model.name,
             name: model.name,
@@ -237,6 +240,10 @@ export async function GET() {
       }
     } catch {
       // Ollama unreachable — still return the cloud catalog below.
+    }
+
+    if (localModels.length === 0) {
+      localModels.push({ id: LOCAL_MODEL, name: LOCAL_MODEL, provider: 'local' });
     }
 
     const models = [

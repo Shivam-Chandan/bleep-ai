@@ -4,13 +4,23 @@ import { useState } from 'react';
 import { useChatStore } from '@/lib/store';
 import { formatDistanceToNow } from 'date-fns';
 
-export function ChatSidebar() {
+interface ChatSidebarProps {
+  onNavigate?: () => void;
+}
+
+export function ChatSidebar({ onNavigate }: ChatSidebarProps) {
   const { chats, currentChatId, createChat, deleteChat, setCurrentChat } = useChatStore();
   const [hoveredChatId, setHoveredChatId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
 
   const handleNewChat = () => {
     createChat();
+    onNavigate?.();
+  };
+
+  const handleSelectChat = (id: string) => {
+    setCurrentChat(id);
+    onNavigate?.();
   };
 
   const handleDeleteChat = (id: string, e: React.MouseEvent) => {
@@ -29,7 +39,7 @@ export function ChatSidebar() {
   };
 
   return (
-    <div className="flex flex-col h-full border-r bg-background">
+    <div className="flex flex-col h-full w-full border-r bg-background">
       <div className="p-4 border-b">
         <div className="flex items-center gap-2">
           <svg className="w-6 h-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -42,7 +52,7 @@ export function ChatSidebar() {
       <div className="p-4 border-b">
         <button
           onClick={handleNewChat}
-          className="w-full flex items-center gap-3 px-3 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors"
+          className="w-full flex items-center gap-3 px-3 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 active:bg-primary/80 transition-colors"
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -62,12 +72,12 @@ export function ChatSidebar() {
             {chats.map((chat) => (
               <li key={chat.id}>
                 <div
-                  className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-xl transition-colors text-left cursor-pointer ${
+                  className={`w-full flex items-center gap-2 px-3 py-3 sm:py-2.5 rounded-xl transition-colors text-left cursor-pointer ${
                     currentChatId === chat.id
                       ? 'bg-primary/10 text-primary'
-                      : 'text-muted-foreground hover:bg-muted'
+                      : 'text-muted-foreground hover:bg-muted active:bg-muted'
                   }`}
-                  onClick={() => setCurrentChat(chat.id)}
+                  onClick={() => handleSelectChat(chat.id)}
                   onMouseEnter={() => setHoveredChatId(chat.id)}
                   onMouseLeave={() => setHoveredChatId(null)}
                 >
@@ -76,17 +86,17 @@ export function ChatSidebar() {
                   </svg>
                   <span className="flex-1 truncate font-medium">{chat.title}</span>
                   <span className="text-xs text-muted-foreground hidden sm:block">{formatDate(chat.updatedAt)}</span>
-                  {hoveredChatId === chat.id && (
-                    <button
-                      onClick={(e) => handleDeleteChat(chat.id, e)}
-                      className="p-1 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
-                      aria-label="Delete chat"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
-                  )}
+                  <button
+                    onClick={(e) => handleDeleteChat(chat.id, e)}
+                    className={`p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors ${
+                      hoveredChatId === chat.id ? 'lg:opacity-100' : 'lg:opacity-0'
+                    } ${showDeleteConfirm === chat.id ? 'text-destructive bg-destructive/10' : ''}`}
+                    aria-label={showDeleteConfirm === chat.id ? 'Confirm delete' : 'Delete chat'}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
                 </div>
               </li>
             ))}
@@ -94,7 +104,7 @@ export function ChatSidebar() {
         )}
       </div>
 
-      <div className="p-4 border-t">
+      <div className="p-4 border-t pb-safe">
         <div className="text-xs text-center text-muted-foreground">
           Powered by Llama (Ollama)
         </div>

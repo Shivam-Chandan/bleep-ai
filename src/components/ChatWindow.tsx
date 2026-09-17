@@ -109,7 +109,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
   if (!currentChatId) {
     return (
       <div className={`flex flex-col h-full ${className}`}>
-        <div className="flex-1 flex items-center justify-center text-muted-foreground">
+        <div className="flex-1 flex items-center justify-center text-muted-foreground p-6">
           <div className="text-center space-y-4">
             <svg className="mx-auto h-16 w-16 text-muted-foreground/50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -125,15 +125,17 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
   }
 
   return (
-    <div className={`flex flex-col h-full ${className}`}>
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
-        {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} isStreaming={isStreaming && message.id === messages[messages.length - 1]?.id} />
-        ))}
+    <div className={`flex flex-col h-full min-h-0 ${className}`}>
+      <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-4 space-y-4 sm:space-y-6">
+        <div className="max-w-3xl mx-auto w-full space-y-4 sm:space-y-6">
+          {messages.map((message) => (
+            <MessageBubble key={message.id} message={message} isStreaming={isStreaming && message.id === messages[messages.length - 1]?.id} />
+          ))}
+        </div>
         <div ref={messagesEndRef} />
       </div>
 
-      <form onSubmit={handleSendMessage} className="border-t p-4">
+      <form onSubmit={handleSendMessage} className="border-t px-3 py-3 sm:p-4 pb-safe bg-background">
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <textarea
             ref={textareaRef}
@@ -143,15 +145,15 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
               adjustHeight(e);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Type a message... (Shift+Enter for new line)"
+            placeholder="Type a message..."
             disabled={isStreaming}
-            className="flex-1 min-h-[44px] max-h-[200px] px-4 py-3 bg-background border rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+            className="flex-1 min-h-[48px] max-h-[160px] sm:max-h-[200px] px-4 py-3 text-base bg-background border rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
             rows={1}
           />
           <button
             type="submit"
             disabled={!inputValue.trim() || isStreaming}
-            className="p-3 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="flex-shrink-0 h-12 w-12 flex items-center justify-center bg-primary text-primary-foreground rounded-2xl hover:bg-primary/90 active:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             aria-label="Send message"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -171,13 +173,13 @@ function MessageBubble({ message, isStreaming }: { message: Message; isStreaming
   return (
     <div className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+        className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-4 py-3 ${
           message.role === 'user'
             ? 'bg-primary text-primary-foreground rounded-br-md'
             : 'bg-muted rounded-bl-md'
         }`}
       >
-        <div className="whitespace-pre-wrap break-words">{message.content}</div>
+        <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed">{message.content}</div>
         {isStreaming && (
           <span className="inline-block w-2 h-2 bg-current opacity-50 animate-pulse ml-1" />
         )}

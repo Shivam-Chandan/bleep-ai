@@ -41,7 +41,7 @@ else
     if [ -n "$MODEL" ]; then
         echo "📦 Available model: $MODEL"
     else
-        echo "⚠️  No models found. Pull a model first: ollama pull llama3.2"
+        echo "⚠️  No models found. Pull a model first: ollama pull qwen2.5:3b"
     fi
 fi
 

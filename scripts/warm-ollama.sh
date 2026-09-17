@@ -4,7 +4,7 @@
 set -euo pipefail
 
 BASE_URL="${OLLAMA_WARM_URL:-http://localhost:11434}"
-MODEL="${OLLAMA_MODEL:-llama3:latest}"
+MODEL="${OLLAMA_MODEL:-qwen2.5:3b}"
 
 # Skip if Ollama is not up yet (systemd will retry on the next timer tick).
 if ! curl -fsS --max-time 5 "${BASE_URL}/api/tags" >/dev/null 2>&1; then

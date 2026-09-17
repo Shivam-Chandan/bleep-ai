@@ -1,5 +1,5 @@
 export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-export const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+export const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:3b';
 
 const OLLAMA_AUTH_TOKEN = process.env.OLLAMA_AUTH_TOKEN;
 

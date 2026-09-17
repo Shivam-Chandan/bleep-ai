@@ -22,7 +22,7 @@ A Next.js chat application that connects to a locally running Llama model via Ol
    ollama serve
    
    # Pull a model (in another terminal)
-   ollama pull llama3.2
+   ollama pull qwen2.5:3b
    ```
 
 2. **Node.js 18+** and npm
@@ -63,7 +63,7 @@ In your Vercel project settings, add:
 
 ```
 OLLAMA_BASE_URL=https://your-tunnel-url.trycloudflare.com
-OLLAMA_MODEL=llama3.2
+OLLAMA_MODEL=qwen2.5:3b
 ```
 
 ### 3. Deploy to Vercel
@@ -128,6 +128,7 @@ Pull any Ollama-compatible model:
 
 ```bash
 # Popular options
+ollama pull qwen2.5:3b      # 3B params, fast (current default)
 ollama pull llama3.2        # 3B params, fast
 ollama pull llama3.1        # 8B params, better quality
 ollama pull mistral         # 7B params, good balance
@@ -155,7 +156,7 @@ Update `OLLAMA_MODEL` in `.env.local` or Vercel env vars to switch models.
 The API proxy handles CORS - Vercel functions can access the tunnel URL.
 
 ### Model Not Found
-Pull the model locally first: `ollama pull llama3.2`
+Pull the model locally first: `ollama pull qwen2.5:3b`
 
 ### Streaming Not Working
 Ensure `OLLAMA_BASE_URL` points to the tunnel URL (not localhost) in Vercel.

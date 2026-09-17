@@ -100,7 +100,7 @@ Edit `.env.local`:
 ```bash
 # Model is served locally on this laptop:
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
+OLLAMA_MODEL=qwen2.5:3b
 
 # Optional: bearer token for an authed Ollama tunnel (leave unset for direct localhost)
 # OLLAMA_AUTH_TOKEN=

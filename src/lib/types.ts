@@ -1,8 +1,18 @@
+export interface Source {
+  title: string;
+  url: string;
+}
+
+// Appended to a partial answer when the user stops generation. Shared by the
+// server (persistence) and the client (live display) so both stay consistent.
+export const INTERRUPT_SUFFIX = '\n\n[Response stopped by user]';
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  sources?: Source[];
 }
 
 export interface Chat {

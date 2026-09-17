@@ -1,109 +1,71 @@
 import { NextRequest, NextResponse } from 'next/server';
-import type { OllamaRequest, OllamaResponse } from '@/lib/types';
-import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
-import { CLOUD_MODELS, DEFAULT_MODEL, LOCAL_MODEL, isCloudModel, type ChatModel } from '@/lib/models';
-import { openRouterChatUrl, openRouterConfigured, openRouterHeaders } from '@/lib/openrouter';
+import type { OllamaRequest } from '@/lib/types';
+import {
+  CLOUD_MODELS,
+  DEFAULT_MODEL,
+  LOCAL_CONTEXT_WINDOW,
+  LOCAL_MODEL,
+  getContextWindow,
+  isCloudModel,
+  type ChatModel,
+} from '@/lib/models';
+import { openRouterConfigured } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
 import { addMessage, listMessages, updateChatTitle, userOwnsChat } from '@/lib/queries';
+import {
+  prepareAgentResponse,
+  detectVerbosity,
+  type AgentMessage,
+} from '@/lib/agent';
+import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
+
+// Do NOT set a low maxDuration here. Vercel counts streamed response time
+// against the function's max duration; the platform default (300s with Fluid
+// Compute) is required so long local-model generations are not killed
+// mid-stream. Setting 60 here previously truncated responses.
+export const maxDuration = 300;
 
 function generateTitle(firstMessage: string): string {
   const words = firstMessage.trim().split(/\s+/);
   return words.slice(0, 6).join(' ') + (words.length > 6 ? '...' : '');
 }
 
-interface StreamDelta {
-  content?: string;
-  done?: boolean;
+interface CollectedResponse {
+  content: string;
+  sources: { title: string; url: string }[];
 }
 
-function parseOllamaLine(line: string): StreamDelta | null {
+async function collectResponse(stream: ReadableStream<Uint8Array>): Promise<CollectedResponse> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let content = '';
+  const sources: { title: string; url: string }[] = [];
+  let buffer = '';
+
   try {
-    const data: OllamaResponse = JSON.parse(line);
-    const delta: StreamDelta = { done: data.done };
-    if (data.message?.content) delta.content = data.message.content;
-    return delta;
-  } catch {
-    return null;
-  }
-}
-
-function parseOpenRouterLine(raw: string): StreamDelta | null {
-  const line = raw.trim();
-  if (!line || !line.startsWith('data:')) return null;
-  const payload = line.slice(5).trim();
-  if (payload === '[DONE]') return { done: true };
-  try {
-    const data = JSON.parse(payload);
-    if (data.error) throw new Error(data.error.message || 'OpenRouter stream error');
-    const content = data.choices?.[0]?.delta?.content;
-    const done = data.choices?.[0]?.finish_reason === 'stop';
-    const delta: StreamDelta = {};
-    if (typeof content === 'string' && content) delta.content = content;
-    if (done) delta.done = true;
-    return Object.keys(delta).length ? delta : null;
-  } catch {
-    return null;
-  }
-}
-
-function createStream(
-  response: Response,
-  parse: (line: string) => StreamDelta | null,
-  onComplete: (content: string) => void | Promise<void>
-) {
-  const encoder = new TextEncoder();
-  return new ReadableStream({
-    async start(controller) {
-      const reader = response.body?.getReader();
-      if (!reader) {
-        controller.close();
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let assistantContent = '';
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const delta = parse(line);
-            if (!delta) continue;
-
-            if (delta.done) {
-              controller.enqueue(
-                encoder.encode(JSON.stringify({ content: '', done: true }) + '\n')
-              );
-              break;
-            }
-            if (delta.content) {
-              assistantContent += delta.content;
-              controller.enqueue(
-                encoder.encode(JSON.stringify({ content: delta.content, done: false }) + '\n')
-              );
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Stream reading error:', error);
-      } finally {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
         try {
-          await onComplete(assistantContent);
-        } catch (e) {
-          console.error('Failed to save assistant message:', e);
+          const event = JSON.parse(line);
+          if (event.type === 'content') content += event.content ?? '';
+          if (event.type === 'sources' && Array.isArray(event.sources)) {
+            sources.push(...event.sources);
+          }
+        } catch {
+          // ignore malformed lines
         }
-        controller.close();
-        reader.releaseLock();
       }
-    },
-  });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { content, sources };
 }
 
 export async function POST(request: NextRequest) {
@@ -161,71 +123,41 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const ollamaRequest: OllamaRequest = {
+    const agentMessages: AgentMessage[] = messages.map((msg) => ({
+      role: msg.role as AgentMessage['role'],
+      content: String(msg.content ?? ''),
+    }));
+    const verbosity = detectVerbosity(agentMessages);
+
+    const { stream: readable } = await prepareAgentResponse({
+      isCloud,
       model,
-      messages: messages.map((msg) => ({ role: msg.role, content: msg.content })),
-      stream,
-      keep_alive: -1,
-      options: {
-        temperature: 0.7,
-        top_p: 0.9,
-        num_predict: 2048,
-        ...options,
+      messages: agentMessages,
+      verbosity,
+      contextWindow: getContextWindow(model),
+      options: options as Record<string, unknown> | undefined,
+      signal: request.signal,
+      onAssistantContent: async (content) => {
+        if (chatId && content) {
+          await addMessage(chatId, 'assistant', content);
+        }
       },
-    };
-
-    const response = isCloud
-      ? await fetch(openRouterChatUrl(), {
-          method: 'POST',
-          headers: openRouterHeaders(),
-          body: JSON.stringify({
-            model,
-            messages: messages.map((msg) => ({ role: msg.role, content: msg.content })),
-            stream,
-          }),
-        })
-      : await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...ollamaAuthHeader(),
-          },
-          body: JSON.stringify(ollamaRequest),
-        });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Model API error:', response.status, errorText);
-      return NextResponse.json(
-        { error: `Model API error: ${response.status} ${errorText}` },
-        { status: response.status }
-      );
-    }
-
-    const parse = isCloud ? parseOpenRouterLine : parseOllamaLine;
+    });
 
     if (stream) {
-      const readable = createStream(response, parse, async (assistantContent) => {
-        if (chatId && assistantContent) {
-          await addMessage(chatId, 'assistant', assistantContent);
-        }
-      });
       return new NextResponse(readable, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'Transfer-Encoding': 'chunked',
+          // Prevent intermediaries (Cloudflare tunnel, proxies) from buffering
+          // the stream, which would make tokens arrive late or stall.
+          'Cache-Control': 'no-cache, no-transform',
+          'X-Accel-Buffering': 'no',
         },
       });
-    } else {
-      const data = await response.json();
-      const content = isCloud
-        ? (data.choices?.[0]?.message?.content as string | undefined)
-        : (data.message?.content as string | undefined);
-      if (chatId && content) {
-        await addMessage(chatId, 'assistant', content);
-      }
-      return NextResponse.json(data);
     }
+
+    return NextResponse.json(await collectResponse(readable));
   } catch (error) {
     console.error('Chat API error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
@@ -252,6 +184,7 @@ export async function GET() {
             id: model.name,
             name: model.name,
             provider: 'local',
+            contextWindow: LOCAL_CONTEXT_WINDOW,
             description: [model.details?.parameter_size, model.details?.quantization_level]
               .filter(Boolean)
               .join(' · '),
@@ -263,7 +196,12 @@ export async function GET() {
     }
 
     if (localModels.length === 0) {
-      localModels.push({ id: LOCAL_MODEL, name: LOCAL_MODEL, provider: 'local' });
+      localModels.push({
+        id: LOCAL_MODEL,
+        name: LOCAL_MODEL,
+        provider: 'local',
+        contextWindow: LOCAL_CONTEXT_WINDOW,
+      });
     }
 
     const models = [

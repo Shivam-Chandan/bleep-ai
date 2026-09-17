@@ -2,22 +2,42 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChatStore } from '@/lib/store';
-import type { Message } from '@/lib/types';
+import { INTERRUPT_SUFFIX, type Message } from '@/lib/types';
+import { MarkdownMessage } from './MarkdownMessage';
 
 interface ChatWindowProps {
   className?: string;
 }
 
+// If no bytes arrive for this long, abort the request. Vercel terminates a
+// function at its max duration (default 300s), which can close the stream
+// without our `done` event — this watchdog guarantees the UI recovers.
+const STREAM_STALL_MS = 150_000;
+
 export function ChatWindow({ className = '' }: ChatWindowProps) {
-  const { currentChatId, getCurrentChat, addMessage, updateMessage, setLoading, setError, models, modelsLoading, getModelForChat, setChatModel } = useChatStore();
+  const { currentChatId, getCurrentChat, addMessage, updateMessage, updateMessageSources, setLoading, setError, models, modelsLoading, getModelForChat, setChatModel, streamingChats, chatStatus, setChatStreaming, setChatStatus } = useChatStore();
   const [inputValue, setInputValue] = useState('');
-  const [isStreaming, setIsStreaming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Abort handle for the in-flight request, plus a flag that distinguishes a
+  // user stop from a network failure so we never auto-retry a stopped answer.
+  const abortRef = useRef<AbortController | null>(null);
+  const userStoppedRef = useRef(false);
 
   const chat = getCurrentChat();
   const messages = chat?.messages || [];
   const selectedModel = currentChatId ? getModelForChat(currentChatId) : undefined;
+  // Streaming is tracked per chat, so an in-flight answer in one chat never
+  // blocks sending in another.
+  const isStreaming = currentChatId ? Boolean(streamingChats[currentChatId]) : false;
+  const statusText = currentChatId ? chatStatus[currentChatId] ?? null : null;
+
+  const selectedModelInfo = models.find((m) => m.id === selectedModel);
+  const contextWindow = selectedModelInfo?.contextWindow ?? 8192;
+  const usedTokens = messages.reduce(
+    (sum, m) => sum + Math.ceil(m.content.length / 4) + 4,
+    0
+  );
 
   const localModels = models.filter((m) => m.provider === 'local');
   const cloudModels = models.filter((m) => m.provider === 'openrouter');
@@ -34,13 +54,15 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     e.preventDefault();
     if (!inputValue.trim() || !currentChatId || isStreaming) return;
 
+    const chatId = currentChatId;
     const userMessage = inputValue.trim();
     setInputValue('');
-    setIsStreaming(true);
+    setChatStreaming(chatId, true);
+    setChatStatus(chatId, null);
     setLoading(true);
     setError(null);
 
-    addMessage(currentChatId, { role: 'user', content: userMessage });
+    addMessage(chatId, { role: 'user', content: userMessage });
 
     // Build the request from history *before* adding the empty assistant
     // placeholder, so the server sees the user message as the last turn.
@@ -50,72 +72,151 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       content: msg.content,
     }));
 
-    const assistantMessage = addMessage(currentChatId, { role: 'assistant', content: '' });
+    const assistantMessage = addMessage(chatId, { role: 'assistant', content: '' });
+
+    userStoppedRef.current = false;
+    // Streamed text lives here so the stop handler can persist the partial answer.
+    let fullContent = '';
 
     const streamResponse = async () => {
+      fullContent = '';
       const body: Record<string, unknown> = {
         messages: formattedMessages,
         stream: true,
-        chatId: currentChatId,
+        chatId,
       };
       if (selectedModel) body.model = selectedModel;
 
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const controller = new AbortController();
+      abortRef.current = controller;
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      const armStallWatchdog = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => controller.abort(), STREAM_STALL_MS);
+      };
+      armStallWatchdog();
 
-      if (!response.ok) {
-        const error = new Error(`API error: ${response.status}`) as Error & { status?: number };
-        error.status = response.status;
-        throw error;
-      }
+      let finished = false;
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let fullContent = '';
+        if (!response.ok) {
+          const error = new Error(`API error: ${response.status}`) as Error & { status?: number };
+          error.status = response.status;
+          throw error;
+        }
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-          for (const line of lines) {
-            if (line.trim()) {
+            // Any data means the stream is alive — reset the watchdog.
+            armStallWatchdog();
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+
+              let parsed: {
+                type?: string;
+                content?: string;
+                text?: string;
+                message?: string;
+                sources?: { title: string; url: string }[];
+              };
               try {
-                const parsed = JSON.parse(line);
-                fullContent += parsed.content;
-                updateMessage(currentChatId, assistantMessage.id, fullContent);
-                if (parsed.done) {
-                  setIsStreaming(false);
-                  setLoading(false);
-                }
+                parsed = JSON.parse(line);
               } catch (e) {
                 console.error('Parse error:', e);
+                continue;
+              }
+
+              if (parsed.type === 'status' && parsed.text) {
+                setChatStatus(chatId, parsed.text);
+                continue;
+              }
+              if (parsed.type === 'sources' && parsed.sources) {
+                updateMessageSources(chatId, assistantMessage.id, parsed.sources);
+                continue;
+              }
+              if (parsed.type === 'error') {
+                const error = new Error(parsed.message || 'The agent encountered an error') as Error & { status?: number };
+                error.status = 400;
+                throw error;
+              }
+              if (parsed.type === 'content' && parsed.content) {
+                fullContent += parsed.content;
+                updateMessage(chatId, assistantMessage.id, fullContent);
+                setChatStatus(chatId, null);
+                continue;
+              }
+              if (parsed.type === 'interrupted') {
+                finished = true;
+                if (fullContent) {
+                  fullContent += INTERRUPT_SUFFIX;
+                  updateMessage(chatId, assistantMessage.id, fullContent);
+                }
+                setChatStreaming(chatId, false);
+                setLoading(false);
+                setChatStatus(chatId, null);
+                continue;
+              }
+              if (parsed.type === 'done') {
+                finished = true;
+                setChatStreaming(chatId, false);
+                setLoading(false);
+                setChatStatus(chatId, null);
               }
             }
           }
         }
+
+        // The stream ended without a `done` event (serverless timeout, dropped
+        // connection, or a hung proxy). Surface it instead of freezing the UI.
+        if (!finished) {
+          const error = new Error(
+            'The response was cut off before it finished. Please try again.'
+          ) as Error & { status?: number };
+          error.status = 408;
+          throw error;
+        }
+      } finally {
+        if (stallTimer) clearTimeout(stallTimer);
       }
     };
 
     const maxAttempts = 3;
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // The user may have stopped while we were waiting to retry.
+        if (userStoppedRef.current) break;
         try {
           await streamResponse();
           setError(null);
           break;
         } catch (error) {
+          // A user stop is intentional — keep the partial answer, never retry.
+          if (userStoppedRef.current) break;
+
           const status = (error as { status?: number }).status;
-          const retryable = status === undefined || status === 502 || status === 503 || status === 504;
+          const retryable =
+            status === undefined || status === 408 || status === 502 || status === 503 || status === 504;
 
           if (retryable && attempt < maxAttempts) {
-            setError('Waking the model, this can take up to a minute…');
+            setChatStatus(chatId, 'Waking the model, this can take up to a minute…');
             await new Promise((resolve) => setTimeout(resolve, 3000));
             continue;
           }
@@ -124,18 +225,40 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
         }
       }
     } catch (error) {
-      console.error('Send message error:', error);
-      const status = (error as { status?: number }).status;
-      setError(
-        status === 504
-          ? 'The model took too long to respond. Please try again.'
-          : error instanceof Error
-            ? error.message
-            : 'Failed to send message'
-      );
-      setIsStreaming(false);
+      if (!userStoppedRef.current) {
+        console.error('Send message error:', error);
+        const status = (error as { status?: number }).status;
+        const aborted = error instanceof DOMException && error.name === 'AbortError';
+        setError(
+          aborted
+            ? 'The response stalled and was stopped. Please try again.'
+            : status === 504
+              ? 'The model took too long to respond. Please try again.'
+              : error instanceof Error
+                ? error.message
+                : 'Failed to send message'
+        );
+      }
+    } finally {
+      if (userStoppedRef.current) {
+        updateMessage(
+          chatId,
+          assistantMessage.id,
+          fullContent ? fullContent + INTERRUPT_SUFFIX : INTERRUPT_SUFFIX.trim()
+        );
+        userStoppedRef.current = false;
+      }
+      abortRef.current = null;
+      setChatStreaming(chatId, false);
       setLoading(false);
+      setChatStatus(chatId, null);
     }
+  };
+
+  const handleStop = () => {
+    if (!abortRef.current) return;
+    userStoppedRef.current = true;
+    abortRef.current.abort();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -210,6 +333,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
               </optgroup>
             )}
           </select>
+          <ContextMeter used={usedTokens} total={contextWindow} />
         </div>
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <textarea
@@ -225,23 +349,75 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
             className="flex-1 min-h-[48px] max-h-[160px] sm:max-h-[200px] px-4 py-3 text-base bg-background border rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
             rows={1}
           />
-          <button
-            type="submit"
-            disabled={!inputValue.trim() || isStreaming}
-            className="flex-shrink-0 h-12 w-12 flex items-center justify-center bg-primary text-primary-foreground rounded-2xl hover:bg-primary/90 active:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            aria-label="Send message"
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
-          </button>
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={handleStop}
+              className="flex-shrink-0 h-12 w-12 flex items-center justify-center bg-foreground text-background rounded-2xl hover:bg-foreground/90 active:bg-foreground/80 transition-colors"
+              aria-label="Stop generating"
+              title="Stop generating"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="7" y="7" width="10" height="10" rx="1.5" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!inputValue.trim()}
+              className="flex-shrink-0 h-12 w-12 flex items-center justify-center bg-primary text-primary-foreground rounded-2xl hover:bg-primary/90 active:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              aria-label="Send message"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+              </svg>
+            </button>
+          )}
         </div>
         {isStreaming && (
           <p className="text-xs text-muted-foreground text-center mt-2">
-            Generating response{selectedModel ? ` with ${selectedModel}` : ''}...
+            {statusText
+              ? statusText
+              : `Generating response${selectedModel ? ` with ${selectedModel}` : ''}...`}
           </p>
         )}
       </form>
+    </div>
+  );
+}
+
+function ContextMeter({ used, total }: { used: number; total: number }) {
+  const ratio = total > 0 ? Math.min(1, used / total) : 0;
+  const percent = Math.round(ratio * 100);
+  const radius = 9;
+  const circumference = 2 * Math.PI * radius;
+  const color =
+    ratio < 0.5 ? 'text-emerald-500' : ratio < 0.8 ? 'text-amber-500' : 'text-red-500';
+
+  return (
+    <div
+      className="relative shrink-0 h-6 w-6"
+      title={`Context: ~${used.toLocaleString()} / ${total.toLocaleString()} tokens (${percent}%)`}
+      aria-label={`Context window ${percent}% used`}
+      role="img"
+    >
+      <svg viewBox="0 0 24 24" className="h-6 w-6 -rotate-90">
+        <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="3" className="stroke-muted-foreground/25" />
+        <circle
+          cx="12"
+          cy="12"
+          r={radius}
+          fill="none"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeDasharray={`${circumference * ratio} ${circumference}`}
+          className={color}
+          stroke="currentColor"
+        />
+      </svg>
+      <span className="absolute inset-0 flex items-center justify-center text-[8px] font-semibold text-muted-foreground">
+        {percent}
+      </span>
     </div>
   );
 }
@@ -256,7 +432,27 @@ function MessageBubble({ message, isStreaming }: { message: Message; isStreaming
             : 'bg-muted rounded-bl-md'
         }`}
       >
-        <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed">{message.content}</div>
+        {message.role === 'assistant' ? (
+          <MarkdownMessage content={message.content} />
+        ) : (
+          <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed">{message.content}</div>
+        )}
+        {message.sources && message.sources.length > 0 && (
+          <div className="mt-3 pt-2 border-t border-current/20 space-y-1">
+            <p className="text-xs font-semibold opacity-70">Sources</p>
+            {message.sources.map((source, index) => (
+              <a
+                key={`${source.url}-${index}`}
+                href={source.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block text-xs underline underline-offset-2 opacity-80 hover:opacity-100 truncate"
+              >
+                [{index + 1}] {source.title || source.url}
+              </a>
+            ))}
+          </div>
+        )}
         {isStreaming && (
           <span className="inline-block w-2 h-2 bg-current opacity-50 animate-pulse ml-1" />
         )}

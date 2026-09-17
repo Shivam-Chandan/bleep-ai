@@ -104,6 +104,8 @@ bleep-ai-chat/
 │   │   ├── ChatSidebar.tsx        # Chat history sidebar
 │   │   └── ChatWindow.tsx         # Chat interface with streaming
 │   └── lib/
+│       ├── agent.ts               # Tool-calling loop + adaptive verbosity
+│       ├── search.ts              # Free DuckDuckGo web search
 │       ├── store.ts               # Zustand state management
 │       └── types.ts               # TypeScript types
 ├── scripts/
@@ -115,12 +117,45 @@ bleep-ai-chat/
 ## Features
 
 - 💬 **Real-time streaming** responses from Llama
+- 🌐 **Web-access agent** — the model can call a free `web_search` tool (DuckDuckGo) when a question needs current information, then cite its sources
+- ✂️ **Adaptive response length** — short answers for basic queries, detailed ones only when the question needs it
+- 🧠 **Context-aware** — history is trimmed to the selected model's context window, with a live usage ring next to the model picker
+- ⏹️ **Stop generation** — the send button becomes a stop button mid-answer; the partial reply is kept and marked as interrupted
+- 🧵 **Concurrent chats** — an in-flight answer in one chat never blocks sending in another
 - 📱 **Responsive design** - works on mobile/desktop
 - 🌙 **Dark mode** support (system preference)
 - 💾 **Persistent chats** - saved to localStorage
 - 🗂️ **Chat history** - create, switch, delete conversations
 - ⚡ **Optimistic UI** - instant message display
 - 🔒 **Secure** - tunnel encrypts traffic, no exposed ports
+
+## Web-Access Agent
+
+When you send a message, the server first asks the model whether the question needs
+live web data. If so, it runs a free DuckDuckGo search (no API key), feeds the top
+results back to the model, and streams an answer that cites its sources. Simple
+questions (greetings, arithmetic, general knowledge) are answered directly without
+a search.
+
+- **Model support:** tool calling works with Ollama's `qwen2.5` family and with
+  OpenRouter's free router (`openrouter/free` automatically picks a tool-capable
+  free model). If a model doesn't support tools, the agent falls back to
+  search-then-answer automatically.
+- **Response length:** a lightweight heuristic detects whether the question is
+  basic, standard, or complex and sets the matching token cap
+  (`150` / `600` / `2000`).
+- **Context window:** each model advertises a context size
+  (`OLLAMA_CONTEXT_WINDOW`, default `8192`; `OPENROUTER_CONTEXT_WINDOW`, default
+  `32768`). Older turns are dropped so the prompt and the reply fit, and the
+  answer cap shrinks automatically as the window fills. The ring by the model
+  picker shows an estimate of how much of the window the current chat uses.
+- **Stopping:** press the stop button while a reply streams to abort the model.
+  The tokens already produced are saved with a `[Response stopped by user]`
+  marker instead of being lost.
+- **Tuning:** `SEARCH_MAX_RESULTS` (default `5`) controls how many results are injected.
+
+DuckDuckGo's free HTML endpoint is best-effort: if it is rate-limited or returns
+no results, the assistant still answers without web context rather than failing.
 
 ## Available Models
 

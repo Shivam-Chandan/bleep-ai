@@ -1,7 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
-import type { Chat, Message } from '@/lib/types';
+import type { Chat, Message, Source } from '@/lib/types';
 import type { ChatModel } from '@/lib/models';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -15,6 +15,9 @@ interface ChatStore {
   modelsLoading: boolean;
   defaultModel: string | null;
   chatModels: Record<string, string>;
+  // Per-chat generation state so multiple chats can stream concurrently.
+  streamingChats: Record<string, boolean>;
+  chatStatus: Record<string, string | null>;
   loadChats: () => Promise<void>;
   loadModels: () => Promise<void>;
   createChat: () => Promise<string>;
@@ -22,8 +25,11 @@ interface ChatStore {
   setCurrentChat: (id: string) => void;
   getModelForChat: (chatId: string) => string | undefined;
   setChatModel: (chatId: string, modelId: string) => void;
+  setChatStreaming: (chatId: string, streaming: boolean) => void;
+  setChatStatus: (chatId: string, status: string | null) => void;
   addMessage: (chatId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message;
   updateMessage: (chatId: string, messageId: string, content: string) => void;
+  updateMessageSources: (chatId: string, messageId: string, sources: Source[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   getCurrentChat: () => Chat | undefined;
@@ -40,7 +46,13 @@ function reviveChat(raw: {
   title: string;
   createdAt: string;
   updatedAt: string;
-  messages: { id: string; role: 'user' | 'assistant'; content: string; timestamp: string }[];
+  messages: {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: string;
+    sources?: { title: string; url: string }[];
+  }[];
 }): Chat {
   return {
     id: raw.id,
@@ -52,6 +64,7 @@ function reviveChat(raw: {
       role: m.role,
       content: m.content,
       timestamp: new Date(m.timestamp),
+      ...(m.sources ? { sources: m.sources } : {}),
     })),
   };
 }
@@ -66,6 +79,8 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   modelsLoading: false,
   defaultModel: null,
   chatModels: {},
+  streamingChats: {},
+  chatStatus: {},
 
   loadModels: async () => {
     set({ modelsLoading: true });
@@ -135,6 +150,16 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
       chatModels: { ...state.chatModels, [chatId]: modelId },
     })),
 
+  setChatStreaming: (chatId: string, streaming: boolean) =>
+    set((state) => ({
+      streamingChats: { ...state.streamingChats, [chatId]: streaming },
+    })),
+
+  setChatStatus: (chatId: string, status: string | null) =>
+    set((state) => ({
+      chatStatus: { ...state.chatStatus, [chatId]: status },
+    })),
+
   addMessage: (chatId: string, message) => {
     const newMessage: Message = {
       ...message,
@@ -167,6 +192,22 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
               ...chat,
               messages: chat.messages.map((msg) =>
                 msg.id === messageId ? { ...msg, content } : msg
+              ),
+              updatedAt: new Date(),
+            }
+          : chat
+      ),
+    }));
+  },
+
+  updateMessageSources: (chatId: string, messageId: string, sources: Source[]) => {
+    set((state) => ({
+      chats: state.chats.map((chat) =>
+        chat.id === chatId
+          ? {
+              ...chat,
+              messages: chat.messages.map((msg) =>
+                msg.id === messageId ? { ...msg, sources } : msg
               ),
               updatedAt: new Date(),
             }

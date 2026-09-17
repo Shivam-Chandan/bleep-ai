@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # vercel-sync.sh - Push local Ollama env vars to a Vercel project and redeploy.
 #
-# Reads OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_AUTH_TOKEN and APP_BASE_URL from
-# .env.local and upserts them into the Vercel project's environment via the REST API.
+# Reads OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_AUTH_TOKEN, APP_BASE_URL,
+# TURSO_DATABASE_URL, TURSO_AUTH_TOKEN and SESSION_SECRET from .env.local and
+# upserts them into the Vercel project's environment via the REST API.
 #
 # Config (secrets, kept out of the repo): ~/.config/bleep-ai/tunnel-sync.env
 #   VERCEL_TOKEN=...              # https://vercel.com/account/tokens
@@ -17,7 +18,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_DIR/.env.local"
 CONFIG_FILE="${TUNNEL_SYNC_CONFIG:-$HOME/.config/bleep-ai/tunnel-sync.env}"
-KEYS=(OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_AUTH_TOKEN APP_BASE_URL)
+KEYS=(OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_AUTH_TOKEN APP_BASE_URL TURSO_DATABASE_URL TURSO_AUTH_TOKEN SESSION_SECRET)
 API_BASE="https://api.vercel.com"
 
 DRY_RUN=false

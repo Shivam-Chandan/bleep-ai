@@ -8,7 +8,7 @@ export async function POST(request: NextRequest) {
     const { username, password } = await request.json();
     const uname = String(username || '').trim();
 
-    const user = getUserByUsername(uname);
+    const user = await getUserByUsername(uname);
     if (!user || !(await verifyPassword(String(password || ''), user.password_hash))) {
       return NextResponse.json({ error: 'Invalid username or password.' }, { status: 401 });
     }

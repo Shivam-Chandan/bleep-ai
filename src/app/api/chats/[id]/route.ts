@@ -11,10 +11,10 @@ export async function DELETE(
   if (auth instanceof NextResponse) return auth;
 
   const { id } = await params;
-  if (!getChat(auth.userId, id)) {
+  if (!(await getChat(auth.userId, id))) {
     return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
   }
-  deleteChat(auth.userId, id);
+  await deleteChat(auth.userId, id);
   return NextResponse.json({ ok: true });
 }
 
@@ -27,7 +27,7 @@ export async function PATCH(
   if (auth instanceof NextResponse) return auth;
 
   const { id } = await params;
-  if (!getChat(auth.userId, id)) {
+  if (!(await getChat(auth.userId, id))) {
     return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
   }
 
@@ -36,6 +36,6 @@ export async function PATCH(
   if (!title) {
     return NextResponse.json({ error: 'Title required' }, { status: 400 });
   }
-  updateChatTitle(auth.userId, id, title);
+  await updateChatTitle(auth.userId, id, title);
   return NextResponse.json({ ok: true });
 }

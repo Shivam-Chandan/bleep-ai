@@ -8,18 +8,24 @@ export async function GET() {
   const auth = await requireSession();
   if (auth instanceof NextResponse) return auth;
 
-  const chats = listChats(auth.userId).map((c) => ({
-    id: c.id,
-    title: c.title,
-    createdAt: new Date(c.created_at).toISOString(),
-    updatedAt: new Date(c.updated_at).toISOString(),
-    messages: listMessages(c.id).map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      timestamp: new Date(m.created_at).toISOString(),
-    })),
-  }));
+  const chatRows = await listChats(auth.userId);
+  const chats = await Promise.all(
+    chatRows.map(async (c) => {
+      const messages = await listMessages(c.id);
+      return {
+        id: c.id,
+        title: c.title,
+        createdAt: new Date(c.created_at).toISOString(),
+        updatedAt: new Date(c.updated_at).toISOString(),
+        messages: messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          timestamp: new Date(m.created_at).toISOString(),
+        })),
+      };
+    })
+  );
 
   return NextResponse.json({ chats });
 }
@@ -38,7 +44,7 @@ export async function POST(request: NextRequest) {
   }
 
   const id = randomUUID();
-  const chat = createChat(auth.userId, id, title);
+  const chat = await createChat(auth.userId, id, title);
   return NextResponse.json({
     id: chat.id,
     title: chat.title,

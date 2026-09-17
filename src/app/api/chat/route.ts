@@ -44,7 +44,7 @@ function parseOpenRouterLine(raw: string): StreamDelta | null {
 function createStream(
   response: Response,
   parse: (line: string) => StreamDelta | null,
-  onComplete: (content: string) => void
+  onComplete: (content: string) => void | Promise<void>
 ) {
   const encoder = new TextEncoder();
   return new ReadableStream({
@@ -89,7 +89,11 @@ function createStream(
       } catch (error) {
         console.error('Stream reading error:', error);
       } finally {
-        onComplete(assistantContent);
+        try {
+          await onComplete(assistantContent);
+        } catch (e) {
+          console.error('Failed to save assistant message:', e);
+        }
         controller.close();
         reader.releaseLock();
       }
@@ -116,7 +120,7 @@ export async function POST(request: NextRequest) {
     }
 
     // If a chatId is supplied, it must belong to the logged-in user.
-    if (chatId && !userOwnsChat(auth.userId, chatId)) {
+    if (chatId && !(await userOwnsChat(auth.userId, chatId))) {
       return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
     }
 
@@ -124,7 +128,7 @@ export async function POST(request: NextRequest) {
     if (chatId) {
       const last = messages[messages.length - 1];
       if (last?.role === 'user') {
-        addMessage(chatId, 'user', last.content);
+        await addMessage(chatId, 'user', last.content);
       }
     }
 
@@ -181,13 +185,9 @@ export async function POST(request: NextRequest) {
     const parse = isCloud ? parseOpenRouterLine : parseOllamaLine;
 
     if (stream) {
-      const readable = createStream(response, parse, (assistantContent) => {
+      const readable = createStream(response, parse, async (assistantContent) => {
         if (chatId && assistantContent) {
-          try {
-            addMessage(chatId, 'assistant', assistantContent);
-          } catch (e) {
-            console.error('Failed to save assistant message:', e);
-          }
+          await addMessage(chatId, 'assistant', assistantContent);
         }
       });
       return new NextResponse(readable, {
@@ -202,7 +202,7 @@ export async function POST(request: NextRequest) {
         ? (data.choices?.[0]?.message?.content as string | undefined)
         : (data.message?.content as string | undefined);
       if (chatId && content) {
-        addMessage(chatId, 'assistant', content);
+        await addMessage(chatId, 'assistant', content);
       }
       return NextResponse.json(data);
     }

@@ -1,5 +1,5 @@
 import 'server-only';
-import { db } from './db';
+import { execute, select } from './db';
 import { randomUUID } from 'node:crypto';
 
 export interface UserRow {
@@ -27,52 +27,69 @@ export interface MessageRow {
 
 // ---------- Users ----------
 
-export function createUser(username: string, passwordHash: string): UserRow {
+export async function createUser(
+  username: string,
+  passwordHash: string
+): Promise<UserRow> {
   const user: UserRow = {
     id: randomUUID(),
     username,
     password_hash: passwordHash,
     created_at: Date.now(),
   };
-  db.prepare(
+  await execute(
     `INSERT INTO users (id, username, password_hash, created_at)
-     VALUES (@id, @username, @password_hash, @created_at)`
-  ).run(user);
+     VALUES (?, ?, ?, ?)`,
+    [user.id, user.username, user.password_hash, user.created_at]
+  );
   return user;
 }
 
-export function getUserByUsername(username: string): UserRow | undefined {
-  return db
-    .prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE`)
-    .get(username) as UserRow | undefined;
+export async function getUserByUsername(
+  username: string
+): Promise<UserRow | undefined> {
+  const rows = await select<UserRow>(
+    `SELECT * FROM users WHERE username = ? COLLATE NOCASE`,
+    [username]
+  );
+  return rows[0];
 }
 
-export function getUserById(id: string): UserRow | undefined {
-  return db.prepare(`SELECT * FROM users WHERE id = ?`).get(id) as
-    | UserRow
-    | undefined;
+export async function getUserById(id: string): Promise<UserRow | undefined> {
+  const rows = await select<UserRow>(`SELECT * FROM users WHERE id = ?`, [id]);
+  return rows[0];
 }
 
-export function countUsers(): number {
-  const row = db.prepare(`SELECT COUNT(*) AS n FROM users`).get() as { n: number };
-  return row.n;
+export async function countUsers(): Promise<number> {
+  const rows = await select<{ n: number }>(`SELECT COUNT(*) AS n FROM users`);
+  return rows[0]?.n ?? 0;
 }
 
 // ---------- Chats ----------
 
-export function listChats(userId: string): ChatRow[] {
-  return db
-    .prepare(`SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC`)
-    .all(userId) as ChatRow[];
+export async function listChats(userId: string): Promise<ChatRow[]> {
+  return select<ChatRow>(
+    `SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC`,
+    [userId]
+  );
 }
 
-export function getChat(userId: string, chatId: string): ChatRow | undefined {
-  return db
-    .prepare(`SELECT * FROM chats WHERE id = ? AND user_id = ?`)
-    .get(chatId, userId) as ChatRow | undefined;
+export async function getChat(
+  userId: string,
+  chatId: string
+): Promise<ChatRow | undefined> {
+  const rows = await select<ChatRow>(
+    `SELECT * FROM chats WHERE id = ? AND user_id = ?`,
+    [chatId, userId]
+  );
+  return rows[0];
 }
 
-export function createChat(userId: string, id: string, title = 'New Chat'): ChatRow {
+export async function createChat(
+  userId: string,
+  id: string,
+  title = 'New Chat'
+): Promise<ChatRow> {
   const now = Date.now();
   const chat: ChatRow = {
     id,
@@ -81,40 +98,56 @@ export function createChat(userId: string, id: string, title = 'New Chat'): Chat
     created_at: now,
     updated_at: now,
   };
-  db.prepare(
+  await execute(
     `INSERT INTO chats (id, user_id, title, created_at, updated_at)
-     VALUES (@id, @user_id, @title, @created_at, @updated_at)`
-  ).run(chat);
+     VALUES (?, ?, ?, ?, ?)`,
+    [chat.id, chat.user_id, chat.title, chat.created_at, chat.updated_at]
+  );
   return chat;
 }
 
-export function updateChatTitle(userId: string, chatId: string, title: string): void {
-  db.prepare(
-    `UPDATE chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?`
-  ).run(title, Date.now(), chatId, userId);
+export async function updateChatTitle(
+  userId: string,
+  chatId: string,
+  title: string
+): Promise<void> {
+  await execute(
+    `UPDATE chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [title, Date.now(), chatId, userId]
+  );
 }
 
-export function touchChat(chatId: string): void {
-  db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(Date.now(), chatId);
+export async function touchChat(chatId: string): Promise<void> {
+  await execute(`UPDATE chats SET updated_at = ? WHERE id = ?`, [
+    Date.now(),
+    chatId,
+  ]);
 }
 
-export function deleteChat(userId: string, chatId: string): void {
-  db.prepare(`DELETE FROM chats WHERE id = ? AND user_id = ?`).run(chatId, userId);
+export async function deleteChat(
+  userId: string,
+  chatId: string
+): Promise<void> {
+  await execute(`DELETE FROM chats WHERE id = ? AND user_id = ?`, [
+    chatId,
+    userId,
+  ]);
 }
 
 // ---------- Messages ----------
 
-export function listMessages(chatId: string): MessageRow[] {
-  return db
-    .prepare(`SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC`)
-    .all(chatId) as MessageRow[];
+export async function listMessages(chatId: string): Promise<MessageRow[]> {
+  return select<MessageRow>(
+    `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC`,
+    [chatId]
+  );
 }
 
-export function addMessage(
+export async function addMessage(
   chatId: string,
   role: 'user' | 'assistant',
   content: string
-): MessageRow {
+): Promise<MessageRow> {
   const msg: MessageRow = {
     id: randomUUID(),
     chat_id: chatId,
@@ -122,15 +155,19 @@ export function addMessage(
     content,
     created_at: Date.now(),
   };
-  db.prepare(
+  await execute(
     `INSERT INTO messages (id, chat_id, role, content, created_at)
-     VALUES (@id, @chat_id, @role, @content, @created_at)`
-  ).run(msg);
-  touchChat(chatId);
+     VALUES (?, ?, ?, ?, ?)`,
+    [msg.id, msg.chat_id, msg.role, msg.content, msg.created_at]
+  );
+  await touchChat(chatId);
   return msg;
 }
 
 // Verify a chat belongs to a user (authorization helper).
-export function userOwnsChat(userId: string, chatId: string): boolean {
-  return getChat(userId, chatId) !== undefined;
+export async function userOwnsChat(
+  userId: string,
+  chatId: string
+): Promise<boolean> {
+  return (await getChat(userId, chatId)) !== undefined;
 }

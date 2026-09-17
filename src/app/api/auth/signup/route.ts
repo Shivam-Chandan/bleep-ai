@@ -23,11 +23,11 @@ export async function POST(request: NextRequest) {
     if (pass.length < 6) {
       return NextResponse.json({ error: 'Password must be at least 6 characters.' }, { status: 400 });
     }
-    if (getUserByUsername(uname)) {
+    if (await getUserByUsername(uname)) {
       return NextResponse.json({ error: 'Username already taken.' }, { status: 409 });
     }
 
-    const user = createUser(uname, await hashPassword(pass));
+    const user = await createUser(uname, await hashPassword(pass));
     await createSession(user.id, user.username);
     return NextResponse.json({ ok: true, username: user.username });
   } catch {

@@ -2,6 +2,7 @@
 
 import { create } from 'zustand';
 import type { Chat, Message } from '@/lib/types';
+import type { ChatModel } from '@/lib/models';
 import { v4 as uuidv4 } from 'uuid';
 
 interface ChatStore {
@@ -10,10 +11,17 @@ interface ChatStore {
   isLoading: boolean;
   isHydrated: boolean;
   error: string | null;
+  models: ChatModel[];
+  modelsLoading: boolean;
+  defaultModel: string | null;
+  chatModels: Record<string, string>;
   loadChats: () => Promise<void>;
+  loadModels: () => Promise<void>;
   createChat: () => Promise<string>;
   deleteChat: (id: string) => Promise<void>;
   setCurrentChat: (id: string) => void;
+  getModelForChat: (chatId: string) => string | undefined;
+  setChatModel: (chatId: string, modelId: string) => void;
   addMessage: (chatId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message;
   updateMessage: (chatId: string, messageId: string, content: string) => void;
   setLoading: (loading: boolean) => void;
@@ -54,6 +62,29 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   isLoading: false,
   isHydrated: false,
   error: null,
+  models: [],
+  modelsLoading: false,
+  defaultModel: null,
+  chatModels: {},
+
+  loadModels: async () => {
+    set({ modelsLoading: true });
+    try {
+      const res = await fetch('/api/chat');
+      if (!res.ok) throw new Error('Failed to load models');
+      const data = await res.json();
+      set({
+        models: data.models || [],
+        defaultModel: data.defaultModel || null,
+        modelsLoading: false,
+      });
+    } catch (e) {
+      set({
+        modelsLoading: false,
+        error: e instanceof Error ? e.message : 'Failed to load models',
+      });
+    }
+  },
 
   loadChats: async () => {
     try {
@@ -92,6 +123,16 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   },
 
   setCurrentChat: (id: string) => set({ currentChatId: id }),
+
+  getModelForChat: (chatId: string) => {
+    const { chatModels, defaultModel } = get();
+    return chatModels[chatId] ?? defaultModel ?? undefined;
+  },
+
+  setChatModel: (chatId: string, modelId: string) =>
+    set((state) => ({
+      chatModels: { ...state.chatModels, [chatId]: modelId },
+    })),
 
   addMessage: (chatId: string, message) => {
     const newMessage: Message = {

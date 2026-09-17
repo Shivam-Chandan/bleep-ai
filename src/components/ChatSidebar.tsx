@@ -128,7 +128,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
           </div>
         )}
         <div className="text-xs text-center text-muted-foreground">
-          Powered by Llama (Ollama)
+          Powered by Ollama + free OpenRouter models
         </div>
       </div>
     </div>

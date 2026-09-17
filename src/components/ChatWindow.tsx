@@ -9,7 +9,7 @@ interface ChatWindowProps {
 }
 
 export function ChatWindow({ className = '' }: ChatWindowProps) {
-  const { currentChatId, getCurrentChat, addMessage, updateMessage, setLoading, setError } = useChatStore();
+  const { currentChatId, getCurrentChat, addMessage, updateMessage, setLoading, setError, models, modelsLoading, getModelForChat, setChatModel } = useChatStore();
   const [inputValue, setInputValue] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -17,6 +17,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
 
   const chat = getCurrentChat();
   const messages = chat?.messages || [];
+  const selectedModel = currentChatId ? getModelForChat(currentChatId) : undefined;
+
+  const localModels = models.filter((m) => m.provider === 'local');
+  const cloudModels = models.filter((m) => m.provider === 'openrouter');
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -46,10 +50,17 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     }));
 
     const streamResponse = async () => {
+      const body: Record<string, unknown> = {
+        messages: formattedMessages,
+        stream: true,
+        chatId: currentChatId,
+      };
+      if (selectedModel) body.model = selectedModel;
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: formattedMessages, stream: true, chatId: currentChatId }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -101,7 +112,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
           const retryable = status === undefined || status === 502 || status === 503 || status === 504;
 
           if (retryable && attempt < maxAttempts) {
-            setError('Waking the local model, this can take up to a minute…');
+            setError('Waking the model, this can take up to a minute…');
             await new Promise((resolve) => setTimeout(resolve, 3000));
             continue;
           }
@@ -114,7 +125,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       const status = (error as { status?: number }).status;
       setError(
         status === 504
-          ? 'The local model took too long to wake up. Please try again.'
+          ? 'The model took too long to respond. Please try again.'
           : error instanceof Error
             ? error.message
             : 'Failed to send message'
@@ -167,6 +178,36 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       </div>
 
       <form onSubmit={handleSendMessage} className="border-t px-3 py-3 sm:p-4 pb-safe bg-background">
+        <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2">
+          <label htmlFor="model-picker" className="text-xs text-muted-foreground shrink-0">
+            Model
+          </label>
+          <select
+            id="model-picker"
+            value={selectedModel ?? ''}
+            onChange={(e) => {
+              if (currentChatId && e.target.value) setChatModel(currentChatId, e.target.value);
+            }}
+            disabled={isStreaming || modelsLoading}
+            className="flex-1 min-w-0 h-8 px-2 text-xs sm:text-sm bg-background border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent disabled:opacity-50"
+          >
+            {selectedModel == null && <option value="">{modelsLoading ? 'Loading…' : 'Default'}</option>}
+            {localModels.length > 0 && (
+              <optgroup label="Local (Ollama)">
+                {localModels.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </optgroup>
+            )}
+            {cloudModels.length > 0 && (
+              <optgroup label="Free (OpenRouter)">
+                {cloudModels.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}{m.description ? ` — ${m.description}` : ''}</option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+        </div>
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <textarea
             ref={textareaRef}
@@ -193,7 +234,9 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
           </button>
         </div>
         {isStreaming && (
-          <p className="text-xs text-muted-foreground text-center mt-2">Generating response...</p>
+          <p className="text-xs text-muted-foreground text-center mt-2">
+            Generating response{selectedModel ? ` with ${selectedModel}` : ''}...
+          </p>
         )}
       </form>
     </div>

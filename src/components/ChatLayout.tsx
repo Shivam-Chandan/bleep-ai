@@ -7,7 +7,7 @@ import { ChatWindow } from './ChatWindow';
 import { ChatSidebar } from './ChatSidebar';
 
 export function ChatLayout({ username }: { username?: string }) {
-  const { chats, isHydrated, loadChats, createChat, getCurrentChat } = useChatStore();
+  const { chats, isHydrated, loadChats, loadModels, createChat, getCurrentChat } = useChatStore();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const router = useRouter();
 
@@ -15,6 +15,10 @@ export function ChatLayout({ username }: { username?: string }) {
   useEffect(() => {
     loadChats();
   }, [loadChats]);
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
 
   // After hydration, ensure there is at least one chat to show.
   useEffect(() => {

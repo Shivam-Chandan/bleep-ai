@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# sync-tunnel-url.sh - Detects the current quick-tunnel URL and, when it changes:
-#   1. writes it to .env.local
-#   2. upserts the Vercel OLLAMA_BASE_URL env var (needs VERCEL_TOKEN / VERCEL_PROJECT)
+# sync-tunnel-url.sh - Detects the current quick-tunnel URLs (Ollama + App) and,
+# when either changes:
+#   1. writes OLLAMA_BASE_URL / APP_BASE_URL to .env.local
+#   2. upserts the Vercel OLLAMA_* env vars (needs VERCEL_TOKEN / VERCEL_PROJECT)
 #   3. triggers a redeploy via a Vercel Deploy Hook (needs VERCEL_DEPLOY_HOOK_URL)
 #
 # Optional config (secrets, kept out of the repo):
@@ -21,25 +22,43 @@ if [ -f "$CONFIG_FILE" ]; then
   set -a; . "$CONFIG_FILE"; set +a
 fi
 
-URL="$("$REPO_DIR/scripts/get-tunnel-url.sh")"
-if [ -z "$URL" ]; then
-  echo "Could not determine tunnel URL; skipping"
+# Tunnel name -> env key to keep in sync.
+declare -A TUNNELS=(
+  [ollama]=OLLAMA_BASE_URL
+  [app]=APP_BASE_URL
+)
+
+changed=false
+
+for tunnel in "${!TUNNELS[@]}"; do
+  key="${TUNNELS[$tunnel]}"
+  url="$("$REPO_DIR/scripts/get-tunnel-url.sh" "$tunnel")"
+
+  if [ -z "$url" ]; then
+    echo "Could not determine ${tunnel} tunnel URL; skipping ${key}"
+    continue
+  fi
+
+  current="$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  if [ "$url" = "$current" ]; then
+    echo "${key} unchanged (${url})"
+    continue
+  fi
+
+  if grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    tmp="$(mktemp)"
+    sed "s|^${key}=.*|${key}=${url}|" "$ENV_FILE" > "$tmp"
+    mv "$tmp" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$url" >> "$ENV_FILE"
+  fi
+  echo "Updated local ${key} -> ${url}"
+  changed=true
+done
+
+if ! $changed; then
   exit 0
 fi
-
-CURRENT="$(grep -E '^OLLAMA_BASE_URL=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-if [ "$URL" = "$CURRENT" ]; then
-  exit 0
-fi
-
-if grep -qE '^OLLAMA_BASE_URL=' "$ENV_FILE" 2>/dev/null; then
-  tmp="$(mktemp)"
-  sed "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=${URL}|" "$ENV_FILE" > "$tmp"
-  mv "$tmp" "$ENV_FILE"
-else
-  printf 'OLLAMA_BASE_URL=%s\n' "$URL" >> "$ENV_FILE"
-fi
-echo "Updated local OLLAMA_BASE_URL -> $URL"
 
 if [ -n "${VERCEL_TOKEN:-}" ] && [ -n "${VERCEL_PROJECT:-}" ]; then
   "$REPO_DIR/scripts/vercel-sync.sh" || echo "Vercel sync failed" >&2

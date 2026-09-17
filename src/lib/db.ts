@@ -23,6 +23,12 @@ const REMOTE_TOKEN =
 
 export const usingRemote = Boolean(REMOTE_URL);
 
+import {
+  RATE_LIMIT_INDEX,
+  RATE_LIMIT_KEY_INDEX,
+  RATE_LIMIT_TABLE,
+} from './rateLimit';
+
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS users (
      id            TEXT PRIMARY KEY,
@@ -48,6 +54,9 @@ const SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at ASC)`,
+  RATE_LIMIT_TABLE,
+  RATE_LIMIT_INDEX,
+  RATE_LIMIT_KEY_INDEX,
 ];
 
 async function createRemoteDriver(): Promise<Driver> {

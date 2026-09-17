@@ -112,12 +112,19 @@ SESSION_SECRET=<run: openssl rand -base64 32>
 # DB_PATH=/absolute/path/to/app.db
 
 # Allow first-time signups; set to false after accounts are created.
-REGISTRATION_OPEN=true
+REGISTRATION_OPEN=false
+
+# REQUIRED once the app is exposed publicly (tunnel/Vercel): a shared secret
+# protecting /api/warm and /api/health. Callers must send it in the
+# Authorization: Bearer header (or a custom header, default: x-health-check).
+# Without it those endpoints return 401. Leave unset only for localhost dev.
+HEALTH_CHECK_SECRET=<run: openssl rand -base64 24>
 ```
 
-Generate the secret:
+Generate the secrets:
 ```bash
-openssl rand -base64 32
+openssl rand -base64 32   # SESSION_SECRET
+openssl rand -base64 24   # HEALTH_CHECK_SECRET
 ```
 
 ### Run (production)
@@ -136,10 +143,10 @@ pm2 save
 
 ### First login
 1. Open `http://localhost:3000` → you'll be redirected to `/login`.
-2. Click **Sign up**, create the first account (username ≥ 3 chars, password ≥ 6 chars).
-3. You're dropped into the chat UI. Chats now persist per-user in SQLite.
-4. After creating all needed accounts, set `REGISTRATION_OPEN=false` in `.env.local`
-   and restart to lock signups.
+2. Click **Sign up**, create the first account (username ≥ 3 chars, password ≥ 10 chars).
+3. You're dropped into the chat UI. Chats now persist per-user (Turso/libSQL when configured, else local SQLite).
+4. Signups are already locked at the app level (`REGISTRATION_OPEN=false` in env).
+   Re-enable temporarily only when you need a new account, then flip it back and restart.
 
 ---
 
@@ -189,7 +196,12 @@ rm cj.txt
 
 ## 7. Security notes
 - Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` in production.
-- Passwords are bcrypt-hashed (never stored in plaintext).
+- Passwords are bcrypt-hashed (never stored in plaintext) and must be ≥ 10 characters.
+- Login is limited to 10 failed attempts per username and 20 per IP per 15 minutes;
+  signup is limited to 3 per IP per hour. Limits live in the app database, so they
+  persist across Vercel cold starts. Tune with `LOGIN_MAX_ATTEMPTS` / `SIGNUP_MAX_PER_IP`.
+- `/api/warm` and `/api/health` are locked behind `HEALTH_CHECK_SECRET` once set
+  (recommended for any public deployment). 
 - `src/proxy.ts` is an *optimistic* gate (checks cookie presence); the real
   verification happens server-side in each route handler / server component.
 - Keep `.env.local` out of git (already git-ignored).

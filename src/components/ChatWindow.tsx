@@ -638,7 +638,7 @@ function ContextMeter({ used, total }: { used: number; total: number }) {
 
 function MessageBubble({ message, isStreaming, durationMs }: { message: Message; isStreaming?: boolean; durationMs?: number }) {
   return (
-    <div className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex gap-3 animate-message-in ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-4 py-3 ${
           message.role === 'user'
@@ -647,7 +647,7 @@ function MessageBubble({ message, isStreaming, durationMs }: { message: Message;
         }`}
       >
         {message.role === 'assistant' ? (
-          <MarkdownMessage content={message.content} />
+          <MarkdownMessage content={message.content} reveal={isStreaming} />
         ) : (
           <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed">{message.content}</div>
         )}

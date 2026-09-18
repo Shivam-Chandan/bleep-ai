@@ -35,7 +35,30 @@ const WRAPPER_CLASS = [
   '[&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1',
 ].join(' ');
 
-export const MarkdownMessage = memo(function MarkdownMessage({ content }: { content: string }) {
+// Characters of streamed content to reveal before the fade replays. Small
+// enough that new words visibly fade in, large enough that the markdown tree
+// isn't re-keyed (and re-parsed) on every single byte.
+const REVEAL_PHASE_CHARS = 8;
+
+export const MarkdownMessage = memo(function MarkdownMessage({
+  content,
+  reveal = false,
+}: {
+  content: string;
+  reveal?: boolean;
+}) {
+  if (reveal) {
+    // While streaming, re-key the wrapper each phase so the reveal animation
+    // replays as new tokens land, softening how each word pops in.
+    const phase = Math.floor(content.length / REVEAL_PHASE_CHARS);
+    return (
+      <div key={phase} className={`${WRAPPER_CLASS} animate-stream-reveal`}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+          {content}
+        </ReactMarkdown>
+      </div>
+    );
+  }
   return (
     <div className={WRAPPER_CLASS}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>

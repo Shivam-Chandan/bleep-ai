@@ -9,13 +9,25 @@ export interface ChatModel {
   contextWindow: number;
 }
 
-export const LOCAL_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:3b';
+// Local models exposed in the picker. OLLAMA_MODELS may be a comma-separated
+// list to surface several (e.g. a GPU-fast small model and a larger CPU one);
+// falls back to OLLAMA_MODEL for single-model setups.
+export const LOCAL_MODELS: string[] = (
+  process.env.OLLAMA_MODELS ||
+  process.env.OLLAMA_MODEL ||
+  'qwen2.5:3b'
+)
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean);
 
-// Ollama defaults to a 2048-token context unless told otherwise, which silently
-// truncates longer chats. We request a larger window and reserve the remainder
-// for history. Override per deployment if the machine has different memory.
+export const LOCAL_MODEL = LOCAL_MODELS[0];
+
+// Local inference is CPU-bound and memory-tight, so we keep the KV cache small
+// (lower num_ctx) to reduce swapping; answers are separately capped via
+// OLLAMA_MAX_TOKENS. Override with OLLAMA_CONTEXT_WINDOW if the machine allows.
 export const LOCAL_CONTEXT_WINDOW =
-  Number(process.env.OLLAMA_CONTEXT_WINDOW) || 8192;
+  Number(process.env.OLLAMA_CONTEXT_WINDOW) || 4096;
 
 // `openrouter/free` routes to whichever free model is available; those vary, so
 // we assume a conservative floor that all common free models satisfy.

@@ -4,7 +4,7 @@ import {
   CLOUD_MODELS,
   DEFAULT_MODEL,
   LOCAL_CONTEXT_WINDOW,
-  LOCAL_MODEL,
+  LOCAL_MODELS,
   getContextWindow,
   isCloudModel,
   type ChatModel,
@@ -169,9 +169,10 @@ export async function GET() {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    // Only expose the configured local model (OLLAMA_MODEL) in the picker,
-    // even though Ollama may have several models pulled.
+    // Expose the configured local models (OLLAMA_MODELS, or OLLAMA_MODEL), even
+    // though Ollama may have several other models pulled on the same server.
     const localModels: ChatModel[] = [];
+    const configured = new Set(LOCAL_MODELS);
     try {
       const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
         headers: { ...ollamaAuthHeader() },
@@ -179,7 +180,7 @@ export async function GET() {
       if (response.ok) {
         const data = await response.json();
         for (const model of data.models || []) {
-          if (model.name !== LOCAL_MODEL) continue;
+          if (!configured.has(model.name)) continue;
           localModels.push({
             id: model.name,
             name: model.name,
@@ -196,12 +197,14 @@ export async function GET() {
     }
 
     if (localModels.length === 0) {
-      localModels.push({
-        id: LOCAL_MODEL,
-        name: LOCAL_MODEL,
-        provider: 'local',
-        contextWindow: LOCAL_CONTEXT_WINDOW,
-      });
+      for (const name of LOCAL_MODELS) {
+        localModels.push({
+          id: name,
+          name,
+          provider: 'local',
+          contextWindow: LOCAL_CONTEXT_WINDOW,
+        });
+      }
     }
 
     const models = [

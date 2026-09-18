@@ -54,6 +54,44 @@ const SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at ASC)`,
+  // Per-user machine tokens used by data-source integrations (Google Apps
+  // Script, Slack poller) to POST into /api/ingest without a session cookie.
+  // Only the SHA-256 hash of the token is stored.
+  `CREATE TABLE IF NOT EXISTS ingest_tokens (
+     token_hash TEXT PRIMARY KEY,
+     user_id    TEXT NOT NULL,
+     label      TEXT NOT NULL DEFAULT '',
+     created_at INTEGER NOT NULL,
+     last_used_at INTEGER,
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_ingest_tokens_user ON ingest_tokens(user_id)`,
+  // Raw items scraped from each source, one row per email/event/message.
+  // Keyed per-user; `day` is the user's local calendar day (YYYY-MM-DD).
+  `CREATE TABLE IF NOT EXISTS digest_items (
+     id          TEXT PRIMARY KEY,
+     user_id     TEXT NOT NULL,
+     source      TEXT NOT NULL,
+     day         TEXT NOT NULL,
+     external_id TEXT,
+     payload     TEXT NOT NULL,
+     created_at  INTEGER NOT NULL,
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+   )`,
+  // Dedupe re-POSTs of the same source item for the same user.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_dedupe
+     ON digest_items(user_id, source, external_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_digest_day
+     ON digest_items(user_id, day, source)`,
+  // One generated markdown summary per user per day.
+  `CREATE TABLE IF NOT EXISTS digest_summaries (
+     user_id    TEXT NOT NULL,
+     day        TEXT NOT NULL,
+     content    TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (user_id, day),
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+   )`,
   RATE_LIMIT_TABLE,
   RATE_LIMIT_INDEX,
   RATE_LIMIT_KEY_INDEX,

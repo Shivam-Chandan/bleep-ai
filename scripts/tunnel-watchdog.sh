@@ -30,6 +30,15 @@ for name in "${!SERVICES[@]}"; do
   last=0
   [ -f "$state" ] && last="$(cat "$state" 2>/dev/null || echo 0)"
 
+  # Only manage services that are meant to be on. A deliberately-disabled
+  # tunnel (e.g. cloudflared-app while the local app is off) must stay down;
+  # `systemctl restart` on it would re-invent the exact outage we're avoiding.
+  # (--quiet: is-enabled prints one line per install slot, unreliable to parse.)
+  if ! systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+    echo "watchdog: ${svc} is disabled - leaving it alone"
+    continue
+  fi
+
   if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
     echo "watchdog: ${svc} is not active; restarting"
     systemctl restart "$svc" 2>/dev/null || true

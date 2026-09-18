@@ -666,11 +666,25 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           console.error('Agent chunk persist error:', e);
         });
       };
+      // The per-chunk DB write is the expensive part (a remote round-trip per
+      // snapshot on Turso). Throttle it to at most once per interval: the live
+      // browser stream already gets every token via the enqueue below, and the
+      // final onAssistantContent always persists the complete answer, so a
+      // reconnect mid-generation is only ever ~1s behind.
+      const CHUNK_FLUSH_INTERVAL_MS = 1000;
+      let flushedAt = 0;
+      const flushSnapshot = () => {
+        if (!assistantContent) return;
+        const now = Date.now();
+        if (now - flushedAt < CHUNK_FLUSH_INTERVAL_MS) return;
+        flushedAt = now;
+        const snapshot = assistantContent;
+        persist(() => opts.onAssistantChunk?.(snapshot));
+      };
       const emit = (event: Record<string, unknown>) => {
         if (event.type === 'content' && typeof event.content === 'string') {
           assistantContent += event.content;
-          const snapshot = assistantContent;
-          persist(() => opts.onAssistantChunk?.(snapshot));
+          flushSnapshot();
         }
         if (clientGone) return;
         try {

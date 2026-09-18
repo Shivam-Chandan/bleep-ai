@@ -35,10 +35,11 @@ const WRAPPER_CLASS = [
   '[&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1',
 ].join(' ');
 
-// Characters of streamed content to reveal before the fade replays. Small
-// enough that new words visibly fade in, large enough that the markdown tree
-// isn't re-keyed (and re-parsed) on every single byte.
-const REVEAL_PHASE_CHARS = 8;
+// Streaming content renders as plain text: re-parsing the full markdown tree on
+// every token was both expensive and janky as the answer grew. Once streaming
+// finishes the component switches to the real markdown renderer.
+const PLAIN_CLASS =
+  'whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed';
 
 export const MarkdownMessage = memo(function MarkdownMessage({
   content,
@@ -48,14 +49,12 @@ export const MarkdownMessage = memo(function MarkdownMessage({
   reveal?: boolean;
 }) {
   if (reveal) {
-    // While streaming, re-key the wrapper each phase so the reveal animation
-    // replays as new tokens land, softening how each word pops in.
-    const phase = Math.floor(content.length / REVEAL_PHASE_CHARS);
+    // Cheap plain-text pass while tokens are landing; a blinking caret marks
+    // the live generation. No markdown work is done here at all.
     return (
-      <div key={phase} className={`${WRAPPER_CLASS} animate-stream-reveal`}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-          {content}
-        </ReactMarkdown>
+      <div className={PLAIN_CLASS}>
+        {content}
+        <span className="inline-block w-[2px] h-[1.1em] align-text-bottom ml-0.5 bg-current opacity-60 animate-pulse" />
       </div>
     );
   }

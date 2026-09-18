@@ -5,10 +5,10 @@ A Next.js chat application that connects to a locally running Llama model via Ol
 ## Architecture
 
 ```
-┌─────────────┐     HTTPS      ┌──────────────────┐     localhost     ┌─────────┐
-│   Vercel    │ ─────────────► │ Cloudflare Tunnel │ ───────────────► │  Ollama │
-│  (Frontend) │                │   (Free, Secure) │                   │ (Local) │
-└─────────────┘                └──────────────────┘                   └─────────┘
+┌─────────────┐     HTTPS      ┌───────────────────────┐   localhost    ┌─────────┐
+│   Vercel    │ ─────────────► │ Tailscale Funnel      │ ─────────────► │  Ollama │
+│  (Frontend) │                │  (ts.net, permanent)  │                │ (Local) │
+└─────────────┘                └───────────────────────┘                └─────────┘
 ```
 
 ## Prerequisites
@@ -27,7 +27,7 @@ A Next.js chat application that connects to a locally running Llama model via Ol
 
 2. **Node.js 18+** and npm
 
-3. **Cloudflare Tunnel** (for production/Vercel deployment) - free, no account needed
+3. **Tailscale** (for production/Vercel deployment) - free Personal plan, permanent `.ts.net` URL, no request-timeout cap. Optional; skip for local-only use.
 
 ## Quick Start (Local Development)
 
@@ -45,48 +45,52 @@ npm run dev
 
 Open http://localhost:3000 - the app will connect to your local Ollama directly.
 
-## Production Deployment (Vercel + Cloudflare Tunnel)
+## Production Deployment (Vercel + Tailscale Funnel)
 
-### 1. Set up Cloudflare Tunnel
-
-Run the setup script (creates a free, secure tunnel):
+### 1. Install + log in to Tailscale
 
 ```bash
-./scripts/setup-tunnel.sh
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up          # opens a browser login (free Personal plan is enough)
 ```
 
-This will output a URL like: `https://random-name.trycloudflare.com`
+### 2. Expose the auth proxy with Funnel
 
-### 2. Configure Vercel Environment Variables
+The app's chat routes authenticate to Ollama behind a Bearer-token proxy on
+`127.0.0.1:11435`. Funnel publishes that proxy at a **permanent** `ts.net` URL
+(a Tailscale Funnel, free) — unlike a Cloudflare quick-tunnel it never rotates
+and has no 100s request cap, so long model loads and streaming replies work
+without the watchdog/URL-sync dance:
 
-In your Vercel project settings, add:
+```bash
+sudo tailscale funnel --bg 11435
+```
+
+This prints the permanent URL, e.g.:
 
 ```
-OLLAMA_BASE_URL=https://your-tunnel-url.trycloudflare.com
+https://bleep-ai.tailc327c1.ts.net   →   proxy http://127.0.0.1:11435
+```
+
+The URL stays active across reboots (config is stored in Tailscale's state DB
+and re-applied by `bleep-funnel.service` on boot). Bearer-token auth still gates
+every request — a no-token curl gets `401`.
+
+### 3. Configure Vercel Environment Variables
+
+In your Vercel project settings, add (one time — the URL never changes):
+
+```
+OLLAMA_BASE_URL=https://bleep-ai.tailc327c1.ts.net
 OLLAMA_MODEL=qwen2.5:3b
 ```
 
-### 3. Deploy to Vercel
+### 4. Deploy to Vercel
 
 ```bash
 # Push to GitHub, then import in Vercel
 # Or deploy directly:
 vercel --prod
-```
-
-### 4. Keep Tunnel Running
-
-For production, run the tunnel as a background service:
-
-```bash
-# Option 1: Keep terminal open
-cloudflared tunnel --url http://localhost:11434
-
-# Option 2: Run as service (Linux/macOS)
-nohup cloudflared tunnel --url http://localhost:11434 > tunnel.log 2>&1 &
-
-# Option 3: Docker (recommended for servers)
-docker run -d --name cloudflare-tunnel --network host cloudflare/cloudflared tunnel --url http://localhost:11434
 ```
 
 ## Project Structure
@@ -109,7 +113,7 @@ bleep-ai-chat/
 │       ├── store.ts               # Zustand state management
 │       └── types.ts               # TypeScript types
 ├── scripts/
-│   └── setup-tunnel.sh            # Cloudflare tunnel setup
+│   └── setup-tunnel.sh            # Tailscale funnel setup
 ├── .env.example                   # Environment template
 └── .env.local                     # Local config (gitignored)
 ```
@@ -194,7 +198,7 @@ Update `OLLAMA_MODEL` in `.env.local` or Vercel env vars to switch models.
 ### "Failed to connect to Ollama"
 - Ensure Ollama is running: `ollama serve`
 - Check if model exists: `ollama list`
-- Verify tunnel URL is accessible: `curl https://your-tunnel.trycloudflare.com/api/tags`
+- Verify Funnel URL is accessible: `curl https://bleep-ai.tailc327c1.ts.net/api/tags`
 
 ### CORS Errors
 The API proxy handles CORS - Vercel functions can access the tunnel URL.

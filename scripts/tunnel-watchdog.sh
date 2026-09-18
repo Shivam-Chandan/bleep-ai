@@ -16,7 +16,10 @@ MIN_FAIL_LINES="${WATCHDOG_MIN_FAIL_LINES:-2}"
 
 declare -A SERVICES=(
   [ollama]="cloudflared-ollama"
-  [app]="cloudflared-app"
+  # The app tunnel is intentionally gone (Vercel hosts the UI; the local
+  # node app and its quick tunnel were retired). Restore this line and re-add
+  # the unit only if self-hosting the app is ever brought back.
+  # [app]="cloudflared-app"
 )
 
 PATTERNS="Register tunnel error|Unauthorized: Tunnel not found|failed to request quick Tunnel|Registered tunnel connection"
@@ -30,14 +33,20 @@ for name in "${!SERVICES[@]}"; do
   last=0
   [ -f "$state" ] && last="$(cat "$state" 2>/dev/null || echo 0)"
 
-  # Only manage services that are meant to be on. A deliberately-disabled
-  # tunnel (e.g. cloudflared-app while the local app is off) must stay down;
-  # `systemctl restart` on it would re-invent the exact outage we're avoiding.
-  # (--quiet: is-enabled prints one line per install slot, unreliable to parse.)
-  if ! systemctl is-enabled --quiet "$svc" 2>/dev/null; then
-    echo "watchdog: ${svc} is disabled - leaving it alone"
-    continue
-  fi
+  # Only manage services that are meant to be on. A deliberately-disabled or
+  # masked tunnel (e.g. cloudflared-app while the local app is off) must stay
+  # down; `systemctl restart` on it would re-invent the outage we're avoiding.
+  # is-enabled prints one line per install slot (and differs for masked), so
+  # match on tokens rather than a bare string/exit code.
+  state="$( { systemctl is-enabled "$svc" 2>/dev/null || echo unknown; } | tr -s ' \n\t' ' ' | xargs)"
+  case " $state " in
+    *" enabled "*|*" static "*|*" indirect "*)
+      ;;
+    *)
+      echo "watchdog: ${svc} is not enabled (${state:-unknown}) - leaving it alone"
+      continue
+      ;;
+  esac
 
   if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
     echo "watchdog: ${svc} is not active; restarting"

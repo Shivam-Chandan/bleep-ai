@@ -263,6 +263,11 @@ async function callModel(params: ModelCallParams): Promise<Response> {
         temperature: 0.7,
         top_p: 0.9,
         num_ctx: params.contextWindow,
+        // Fill GPU VRAM first, spill remaining layers to CPU RAM. Auto (-1) is
+        // overly conservative on this 2GB 840M and only placed 5/36 layers
+        // (~1GB of VRAM left idle). Measured on this box: 24 layers fills
+        // ~1887MiB (70% GPU) and loads stably; 28+ fails with CUDA OOM.
+        num_gpu: 24,
         ...params.options,
         num_predict: params.maxTokens ?? 2048,
       },

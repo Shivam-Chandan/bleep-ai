@@ -29,7 +29,7 @@ for MODEL in "${MODEL_LIST[@]}"; do
   echo "Warming ${MODEL} via ${BASE_URL}..."
   if body="$(curl -fsS --connect-timeout 5 --max-time 600 -X POST "${BASE_URL}/api/generate" \
     -H 'Content-Type: application/json' \
-    -d "{\"model\":\"${MODEL}\",\"prompt\":\"\",\"stream\":false,\"keep_alive\":-1,\"options\":{\"num_predict\":1}}" \
+    -d "{\"model\":\"${MODEL}\",\"prompt\":\"\",\"stream\":false,\"keep_alive\":-1,\"options\":{\"num_predict\":1,\"num_gpu\":24}}" \
     2>&1)"; then
     echo "Warmed ${MODEL}"
   else

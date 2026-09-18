@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { randomUUID } from 'node:crypto';
 import type { OllamaRequest } from '@/lib/types';
 import {
   CLOUD_MODELS,
@@ -11,7 +12,20 @@ import {
 } from '@/lib/models';
 import { openRouterConfigured } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
-import { addMessage, listMessages, updateChatTitle, userOwnsChat } from '@/lib/queries';
+import {
+  addAssistantChunk,
+  addMessage,
+  listMessages,
+  updateChatTitle,
+  userOwnsChat,
+} from '@/lib/queries';
+import {
+  beginGeneration,
+  consumeStopped,
+  publish,
+  registerStop,
+  type GenerationEvent,
+} from '@/lib/generation';
 import {
   prepareAgentResponse,
   detectVerbosity,
@@ -80,7 +94,8 @@ export async function POST(request: NextRequest) {
       stream = true,
       options,
       chatId,
-    } = body as OllamaRequest & { chatId?: string };
+      assistantMessageId,
+    } = body as OllamaRequest & { chatId?: string; assistantMessageId?: string };
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
@@ -129,23 +144,78 @@ export async function POST(request: NextRequest) {
     }));
     const verbosity = detectVerbosity(agentMessages);
 
-    const { stream: readable } = await prepareAgentResponse({
-      isCloud,
-      model,
-      messages: agentMessages,
-      verbosity,
-      contextWindow: getContextWindow(model),
-      options: options as Record<string, unknown> | undefined,
-      signal: request.signal,
-      onAssistantContent: async (content) => {
-        if (chatId && content) {
-          await addMessage(chatId, 'assistant', content);
-        }
-      },
-    });
+    // The client-suggested placeholder id ties the live answer in the browser
+    // to the persisted copy, so reconnect/resume addresses the same message.
+    const answerId =
+      typeof assistantMessageId === 'string' && assistantMessageId.trim()
+        ? assistantMessageId.trim()
+        : randomUUID();
+
+    // Generation is decoupled from the HTTP connection: it keeps running and
+    // accumulating into the DB even if the browser drops away. The only way to
+    // stop it is an explicit POST /api/chat/stop from the client.
+    const genController = new AbortController();
+    const endGeneration = chatId ? beginGeneration(chatId) : () => {};
+    if (chatId) registerStop(chatId, () => genController.abort());
+    let finalized = false;
+    const finalize = (event: GenerationEvent) => {
+      if (finalized || !chatId) return;
+      finalized = true;
+      publish(chatId, event);
+      endGeneration();
+    };
+
+    let prepared;
+    try {
+      prepared = await prepareAgentResponse({
+        isCloud,
+        model,
+        messages: agentMessages,
+        verbosity,
+        contextWindow: getContextWindow(model),
+        options: options as Record<string, unknown> | undefined,
+        signal: genController.signal,
+        // Persist + broadcast the partial answer on every streamed chunk so a
+        // disconnected client can re-sync at any moment.
+        onAssistantChunk: async (content) => {
+          if (!chatId || !content) return;
+          await addAssistantChunk(chatId, answerId, content);
+          publish(chatId, {
+            type: 'content',
+            messageId: answerId,
+            content,
+          });
+        },
+        onAssistantContent: async (content) => {
+          if (!chatId) return;
+          if (content) await addAssistantChunk(chatId, answerId, content);
+          const interrupted = consumeStopped(chatId);
+          finalize(
+            interrupted
+              ? { type: 'interrupted', messageId: answerId, content }
+              : { type: 'done', messageId: answerId, content }
+          );
+        },
+        onError: async (message) => {
+          finalize({ type: 'error', message, messageId: answerId });
+        },
+      });
+    } catch (error) {
+      // The model call failed before any stream was produced. Release the busy
+      // slot and tell any reconnected listener the generation is over.
+      if (chatId) {
+        publish(chatId, {
+          type: 'error',
+          message: error instanceof Error ? error.message : 'Generation failed',
+          messageId: answerId,
+        });
+        endGeneration();
+      }
+      throw error;
+    }
 
     if (stream) {
-      return new NextResponse(readable, {
+      return new NextResponse(prepared.stream, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'Transfer-Encoding': 'chunked',
@@ -157,7 +227,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    return NextResponse.json(await collectResponse(readable));
+    return NextResponse.json(await collectResponse(prepared.stream));
   } catch (error) {
     console.error('Chat API error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

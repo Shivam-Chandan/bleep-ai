@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useChatStore } from '@/lib/store';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -13,6 +14,12 @@ interface ChatSidebarProps {
 export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps) {
   const { chats, currentChatId, createChat, deleteChat, setCurrentChat } = useChatStore();
   const [hoveredChatId, setHoveredChatId] = useState<string | null>(null);
+  const router = useRouter();
+
+  const handleOpenAccount = () => {
+    router.push('/account');
+    onNavigate?.();
+  };
 
   const handleNewChat = () => {
     createChat().catch(() => {});
@@ -106,14 +113,21 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
       </div>
 
       <div className="p-4 border-t pb-safe space-y-3">
-        {username && (
+{username && (
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+            <button
+              onClick={handleOpenAccount}
+              className="flex items-center gap-2 min-w-0 group flex-1 text-left rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              aria-label="Open account settings"
+              title="Account settings"
+            >
               <div className="w-8 h-8 flex-shrink-0 rounded-full bg-primary/10 text-primary flex items-center justify-center font-semibold uppercase">
                 {username.charAt(0)}
               </div>
-              <span className="truncate text-sm font-medium">{username}</span>
-            </div>
+              <span className="truncate text-sm font-medium group-hover:text-primary transition-colors">
+                {username}
+              </span>
+            </button>
             <button
               onClick={onLogout}
               className="p-2 rounded-lg text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"

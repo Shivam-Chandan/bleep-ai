@@ -117,7 +117,7 @@ bleep-ai-chat/
 ## Features
 
 - 💬 **Real-time streaming** responses from Llama
-- 🌐 **Web-access agent** — the model can call a free `web_search` tool (DuckDuckGo) when a question needs current information, then cite its sources
+- 🌐 **Web-access agent** — searches (DuckDuckGo, no API key) when a question needs current information, then streams a grounded answer that cites its sources
 - ✂️ **Adaptive response length** — short answers for basic queries, detailed ones only when the question needs it
 - 🧠 **Context-aware** — history is trimmed to the selected model's context window, with a live usage ring next to the model picker
 - ⏹️ **Stop generation** — the send button becomes a stop button mid-answer; the partial reply is kept and marked as interrupted
@@ -131,28 +131,37 @@ bleep-ai-chat/
 
 ## Web-Access Agent
 
-When you send a message, the server first asks the model whether the question needs
-live web data. If so, it runs a free DuckDuckGo search (no API key), feeds the top
-results back to the model, and streams an answer that cites its sources. Simple
-questions (greetings, arithmetic, general knowledge) are answered directly without
-a search.
+Search is decided per model type so slow local models stay responsive:
 
-- **Model support:** tool calling works with Ollama's `qwen2.5` family and with
-  OpenRouter's free router (`openrouter/free` automatically picks a tool-capable
-  free model). If a model doesn't support tools, the agent falls back to
-  search-then-answer automatically.
+- **Local models** run on CPU and are by far the slowest part of the stack, so the
+  server uses a fast keyword heuristic (freshness/live-data signals such as
+  `latest`, `news`, `today`, `price`, a year, or a URL) to decide whether to
+  search. The answer is then streamed in a **single model call** — there is no
+  separate non-streaming "decide" round trip, which roughly halves latency.
+- **Cloud models** (`openrouter/free`) are fast enough to keep LLM-decided tool
+  calling: the model calls a free DuckDuckGo `web_search` tool (no API key) when
+  it needs live data, and the grounded answer is streamed back with citations.
+
+Simple questions (greetings, arithmetic, general knowledge) are answered directly
+without a search. Tools never block the stream: local answers start streaming
+immediately, and cloud falls back to search-then-answer if a model doesn't
+support tools.
+
 - **Response length:** a lightweight heuristic detects whether the question is
   basic, standard, or complex and sets the matching token cap
-  (`150` / `600` / `2000`).
+  (`150` / `600` / `2000`). Local answers are capped at `OLLAMA_MAX_TOKENS`
+  (default `512`) because a CPU-only model can otherwise spend 20+ minutes on a
+  single reply.
 - **Context window:** each model advertises a context size
-  (`OLLAMA_CONTEXT_WINDOW`, default `8192`; `OPENROUTER_CONTEXT_WINDOW`, default
+  (`OLLAMA_CONTEXT_WINDOW`, default `4096`; `OPENROUTER_CONTEXT_WINDOW`, default
   `32768`). Older turns are dropped so the prompt and the reply fit, and the
   answer cap shrinks automatically as the window fills. The ring by the model
   picker shows an estimate of how much of the window the current chat uses.
 - **Stopping:** press the stop button while a reply streams to abort the model.
   The tokens already produced are saved with a `[Response stopped by user]`
   marker instead of being lost.
-- **Tuning:** `SEARCH_MAX_RESULTS` (default `5`) controls how many results are injected.
+- **Tuning:** `SEARCH_MAX_RESULTS` (default `5`) controls how many results are injected,
+  and `OLLAMA_MAX_TOKENS` caps the length of local replies.
 
 DuckDuckGo's free HTML endpoint is best-effort: if it is rate-limited or returns
 no results, the assistant still answers without web context rather than failing.

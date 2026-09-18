@@ -87,6 +87,14 @@ const MIN_RESPONSE_TOKENS = 128;
 
 const DEFAULT_CONTEXT_WINDOW = 8192;
 
+// Local models run on CPU at ~1.5 tok/s, where a 2000-token "detailed" reply can
+// take 20+ minutes. Cap local answers so a single turn stays usable. Tunable via
+// OLLAMA_MAX_TOKENS.
+const LOCAL_MAX_ANSWER_TOKENS = Math.max(
+  64,
+  Number(process.env.OLLAMA_MAX_TOKENS) || 512
+);
+
 // Rough token estimate (~4 chars per token for English). Good enough to keep a
 // conversation inside the model's window without shipping a tokenizer.
 export function estimateTokens(text: string): number {
@@ -188,6 +196,26 @@ export function detectVerbosity(messages: AgentMessage[]): VerbosityPlan {
     instruction:
       'Be concise and directly answer the question in short paragraphs. Add detail or examples only when the question clearly requires them.',
   };
+}
+
+// ---------- Web-search gating ----------
+
+// Signals that a question depends on fresh, real-world, or web-only information.
+// Used to skip the model's tool-decision round trip on slow local models: every
+// avoided model call saves tens of seconds at CPU speeds.
+const SEARCH_SIGNALS = [
+  /https?:\/\//i,
+  /\b(latest|newest|current|currently|recent|recently|today|tonight|tomorrow|yesterday|breaking|live)\b/i,
+  /\b(news|headline|headlines|weather|forecast|score|scores|standings|schedule|stock|price|prices|cost|worth|exchange rate|election|poll|release|released|changelog|version|update|updated)\b/i,
+  /\b(who won|who is winning|when (is|was|did|does|will)|where (is|can)|how much (is|are|does|did)|how many)\b/i,
+  /\b20(2[4-9]|3\d)\b/,
+  /\b(search|google|look ?up|browse|find (online|out)|on the web)\b/i,
+];
+
+export function shouldSearchWeb(message: string): boolean {
+  const q = message.trim();
+  if (!q) return false;
+  return SEARCH_SIGNALS.some((re) => re.test(q));
 }
 
 // ---------- Model I/O ----------
@@ -402,6 +430,12 @@ export interface AgentResponseOptions {
   options?: Record<string, unknown>;
   signal?: AbortSignal;
   onAssistantContent: (content: string) => void | Promise<void>;
+  // Called with the full accumulated answer after every streamed chunk so the
+  // caller can persist the partial response incrementally.
+  onAssistantChunk?: (content: string) => void | Promise<void>;
+  // Called when the model call fails mid-stream so the caller can finalise
+  // (e.g. notify reconnected listeners) instead of leaving it running.
+  onError?: (message: string) => void | Promise<void>;
 }
 
 export interface PreparedResponse {
@@ -431,18 +465,32 @@ function fitVerbosity(
   };
 }
 
+// Local answers are capped hard; cloud models are fast enough to honour the
+// full verbosity tier.
+function capVerbosity(verbosity: VerbosityPlan, maxTokens: number): VerbosityPlan {
+  if (verbosity.maxTokens <= maxTokens) return verbosity;
+  return {
+    ...verbosity,
+    maxTokens,
+    instruction:
+      verbosity.instruction + ' Keep the answer focused and prioritise the most important points.',
+  };
+}
+
 export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<PreparedResponse> {
-  const { isCloud, model, messages, verbosity, options } = opts;
+  const { isCloud, model, messages, options } = opts;
   const contextWindow = opts.contextWindow || DEFAULT_CONTEXT_WINDOW;
+
+  const effective = isCloud ? opts.verbosity : capVerbosity(opts.verbosity, LOCAL_MAX_ANSWER_TOKENS);
 
   // Reserve room for the system prompt and the full response before trimming,
   // so the selected answer size always fits inside the window.
   const history = trimHistory(
     messages,
     contextWindow,
-    SYSTEM_RESERVE_TOKENS + verbosity.maxTokens
+    SYSTEM_RESERVE_TOKENS + effective.maxTokens
   );
-  const fitted = fitVerbosity(verbosity, contextWindow, history);
+  const fitted = fitVerbosity(effective, contextWindow, history);
 
   // One signal that fires on user stop or client disconnect, used for every
   // upstream request so a cancelled turn releases the model immediately.
@@ -453,81 +501,26 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
   }
 
   let sources: SearchResult[] = [];
-  let mode: 'content' | 'tool' | 'fallback' = 'content';
+  let mode: 'direct' | 'grounded' | 'content' | 'tool' | 'fallback' = 'direct';
   let decision: Decision = { content: '', toolCalls: [] };
   let streamable: Response | null = null;
-  let fallbackError: unknown = null;
 
-  for (let attempt = 0; attempt < MAX_MODEL_CALLS; attempt++) {
-    try {
-      if (attempt === 0) {
-        // Decision call: tools enabled, non-streaming so tool calls arrive intact.
-        const res = await callModel({
-          isCloud,
-          model,
-          messages: [
-            { role: 'system', content: `${baseSystem(fitted)}\n\n` +
-              'Decide whether to use the web_search tool. Call it only when the answer needs ' +
-              'current, real-world, or web-based information (news, recent events, prices, live data, ' +
-              'external docs). Do NOT call it for greetings, simple math, general knowledge you are ' +
-              'confident about, or short chit-chat.' },
-            ...history,
-          ],
-          stream: false,
-          contextWindow,
-          maxTokens: fitted.maxTokens,
-          tools: [WEB_SEARCH_TOOL],
-          options,
-          signal: combineSignals(upstream.signal, DECISION_TIMEOUT_MS),
-        });
-        if (!res.ok) throw new Error(`Model API error: ${res.status}`);
-
-        decision = await parseDecision(isCloud, res);
-        const searchCall = decision.toolCalls.find((c) => c.name === 'web_search');
-
-        if (!searchCall) {
-          mode = 'content';
-          break;
-        }
-
-        // Model asked for a search.
-        mode = 'tool';
-        const query = String(searchCall.args?.query ?? '').trim() || lastUserContent(history);
-        sources = await searchWeb(query).catch(() => []);
-
-        const toolResult =
-          sources.length > 0
-            ? formatSearchContext(sources)
-            : 'The web search returned no results. Ask the user for clarification or answer from knowledge.';
-
-        streamable = await callModel({
-          isCloud,
-          model,
-          messages: [
-            { role: 'system', content: baseSystem(fitted) },
-            ...history,
-            { role: 'assistant', content: decision.content, tool_calls: decision.toolCalls },
-            toolResultMessage(isCloud, searchCall, toolResult),
-          ],
-          stream: true,
-          contextWindow,
-          maxTokens: fitted.maxTokens,
-          options,
-          signal: upstream.signal,
-        });
-        if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
-        break;
-      }
-
-      // Fallback (attempt 1): the decision call failed — likely the model does not
-      // support tools. Degrade to always-on search-then-answer.
-      mode = 'fallback';
-      sources = await searchWeb(lastUserContent(history)).catch(() => []);
+  if (!isCloud) {
+    // Fast local path. A CPU-only model runs at ~1.5 tok/s, so every extra model
+    // call costs tens of seconds. Skip the tool-decision round trip entirely: a
+    // cheap keyword heuristic gates search and the answer is always streamed.
+    const lastUser = lastUserContent(history);
+    if (shouldSearchWeb(lastUser)) {
+      mode = 'grounded';
+      sources = await searchWeb(lastUser).catch(() => []);
       streamable = await callModel({
         isCloud,
         model,
         messages: [
-          { role: 'system', content: systemWithContext(formatSearchContext(sources)) },
+          {
+            role: 'system',
+            content: `${baseSystem(fitted)}\n\n${formatSearchContext(sources)}`,
+          },
           ...history,
         ],
         stream: true,
@@ -536,11 +529,108 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         options,
         signal: upstream.signal,
       });
-      if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
-    } catch (e) {
-      fallbackError = e;
-      if (attempt === 0 && !isAbortError(e)) continue;
-      throw fallbackError;
+    } else {
+      mode = 'direct';
+      streamable = await callModel({
+        isCloud,
+        model,
+        messages: [{ role: 'system', content: baseSystem(fitted) }, ...history],
+        stream: true,
+        contextWindow,
+        maxTokens: fitted.maxTokens,
+        options,
+        signal: upstream.signal,
+      });
+    }
+    if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
+  } else {
+    // Cloud path: tool calling is near-instant, so let the model decide whether a
+    // search is warranted, falling back to search-then-answer if tools are unsupported.
+    let fallbackError: unknown = null;
+    for (let attempt = 0; attempt < MAX_MODEL_CALLS; attempt++) {
+      try {
+        if (attempt === 0) {
+          // Decision call: tools enabled, non-streaming so tool calls arrive intact.
+          const res = await callModel({
+            isCloud,
+            model,
+            messages: [
+              { role: 'system', content: `${baseSystem(fitted)}\n\n` +
+                'Decide whether to use the web_search tool. Call it only when the answer needs ' +
+                'current, real-world, or web-based information (news, recent events, prices, live data, ' +
+                'external docs). Do NOT call it for greetings, simple math, general knowledge you are ' +
+                'confident about, or short chit-chat.' },
+              ...history,
+            ],
+            stream: false,
+            contextWindow,
+            maxTokens: fitted.maxTokens,
+            tools: [WEB_SEARCH_TOOL],
+            options,
+            signal: combineSignals(upstream.signal, DECISION_TIMEOUT_MS),
+          });
+          if (!res.ok) throw new Error(`Model API error: ${res.status}`);
+
+          decision = await parseDecision(isCloud, res);
+          const searchCall = decision.toolCalls.find((c) => c.name === 'web_search');
+
+          if (!searchCall) {
+            mode = 'content';
+            break;
+          }
+
+          // Model asked for a search.
+          mode = 'tool';
+          const query = String(searchCall.args?.query ?? '').trim() || lastUserContent(history);
+          sources = await searchWeb(query).catch(() => []);
+
+          const toolResult =
+            sources.length > 0
+              ? formatSearchContext(sources)
+              : 'The web search returned no results. Ask the user for clarification or answer from knowledge.';
+
+          streamable = await callModel({
+            isCloud,
+            model,
+            messages: [
+              { role: 'system', content: baseSystem(fitted) },
+              ...history,
+              { role: 'assistant', content: decision.content, tool_calls: decision.toolCalls },
+              toolResultMessage(isCloud, searchCall, toolResult),
+            ],
+            stream: true,
+            contextWindow,
+            maxTokens: fitted.maxTokens,
+            options,
+            signal: upstream.signal,
+          });
+          if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
+          break;
+        }
+
+        // Fallback (attempt 1): the decision call failed — likely the model does not
+        // support tools. Degrade to always-on search-then-answer.
+        mode = 'fallback';
+        sources = await searchWeb(lastUserContent(history)).catch(() => []);
+        streamable = await callModel({
+          isCloud,
+          model,
+          messages: [
+            { role: 'system', content: systemWithContext(formatSearchContext(sources)) },
+            ...history,
+          ],
+          stream: true,
+          contextWindow,
+          maxTokens: fitted.maxTokens,
+          options,
+          signal: upstream.signal,
+        });
+        if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
+      } catch (e) {
+        fallbackError = e;
+        if (attempt === 0 && !isAbortError(e)) continue;
+        throw fallbackError;
+      }
     }
   }
 
@@ -550,15 +640,33 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
 
   const stream = new ReadableStream({
     async start(controller) {
-      // The consumer may disappear (user stop); swallow enqueues after that.
+      // The consumer may disappear (user stop, closed tab, internet blip).
+      // Once the first enqueue fails we stop pushing to the client, but we
+      // deliberately KEEP generating: every chunk is persisted via
+      // onAssistantChunk (and published to any reconnected listener), so a
+      // dropped connection never loses or halts the response.
+      let clientGone = false;
+      let assistantContent = '';
+      // Serialise chunk persistence so writes never interleave out of order.
+      let persistChain: Promise<void> = Promise.resolve();
+      const persist = (fn: () => void | Promise<void>) => {
+        persistChain = persistChain.then(fn).catch((e) => {
+          console.error('Agent chunk persist error:', e);
+        });
+      };
       const emit = (event: Record<string, unknown>) => {
+        if (event.type === 'content' && typeof event.content === 'string') {
+          assistantContent += event.content;
+          const snapshot = assistantContent;
+          persist(() => opts.onAssistantChunk?.(snapshot));
+        }
+        if (clientGone) return;
         try {
           controller.enqueue(emitAs(event));
         } catch {
-          // stream already cancelled — persistence below still runs
+          clientGone = true;
         }
       };
-      let assistantContent = '';
       try {
         if (mode === 'content') {
           const content = decision.content ?? '';
@@ -566,23 +674,32 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           if (content) emit({ type: 'content', content });
           emit({ type: 'done' });
         } else {
-          emit({ type: 'status', text: 'Searching the web…' });
-          emit({
-            type: 'sources',
-            sources: sources.map((s) => ({ title: s.title, url: s.url })),
-          });
+          if (mode !== 'direct') {
+            emit({ type: 'status', text: 'Searching the web…' });
+            emit({
+              type: 'sources',
+              sources: sources.map((s) => ({ title: s.title, url: s.url })),
+            });
+          }
           const result = await pipeModelStream(streamable!, isCloud, emit, upstream.signal);
           assistantContent = result.content;
           if (result.interrupted) {
             emit({ type: 'interrupted' });
-            if (assistantContent) assistantContent += INTERRUPT_SUFFIX;
+            // Always record the stop, even if no token made it out yet.
+            assistantContent = assistantContent
+              ? assistantContent + INTERRUPT_SUFFIX
+              : INTERRUPT_SUFFIX.trim();
           }
         }
+        await persistChain;
         await opts.onAssistantContent(assistantContent);
       } catch (e) {
         console.error('Agent stream error:', e);
-        emit({ type: 'error', message: e instanceof Error ? e.message : 'Streaming error' });
+        const message = e instanceof Error ? e.message : 'Streaming error';
+        emit({ type: 'error', message });
+        await opts.onError?.(message);
         try {
+          await persistChain;
           await opts.onAssistantContent(assistantContent);
         } catch {
           // ignore persistence failures while reporting the stream error
@@ -596,8 +713,10 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
       }
     },
     cancel() {
-      // Client went away — stop the model instead of generating into the void.
-      upstream.abort();
+      // Client went away. We intentionally DO NOT abort the model: generation
+      // continues server-side and each chunk is persisted, so a blip or reload
+      // can re-sync (GET /api/chats/:id/events) and never loses the answer.
+      // A deliberate stop goes through POST /api/chat/stop instead.
     },
   });
 

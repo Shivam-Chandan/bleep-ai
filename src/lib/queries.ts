@@ -60,6 +60,16 @@ export async function getUserById(id: string): Promise<UserRow | undefined> {
   return rows[0];
 }
 
+export async function updateUserPassword(
+  userId: string,
+  passwordHash: string
+): Promise<void> {
+  await execute(`UPDATE users SET password_hash = ? WHERE id = ?`, [
+    passwordHash,
+    userId,
+  ]);
+}
+
 export async function countUsers(): Promise<number> {
   const rows = await select<{ n: number }>(`SELECT COUNT(*) AS n FROM users`);
   return rows[0]?.n ?? 0;
@@ -165,6 +175,39 @@ export async function addMessage(
   );
   await touchChat(chatId);
   return msg;
+}
+
+// Upsert a streamed assistant chunk into the in-flight response identified by
+// `messageId` (the same id the client assigned its placeholder). Called for
+// every chunk during generation so the partial answer is persisted to the DB
+// and survives a client disconnect; idempotent across retries.
+export async function addAssistantChunk(
+  chatId: string,
+  messageId: string,
+  content: string
+): Promise<void> {
+  const info = await execute(
+    `UPDATE messages SET content = ? WHERE id = ? AND chat_id = ?`,
+    [content, messageId, chatId]
+  );
+  if (info.rowsAffected > 0) return;
+  await execute(
+    `INSERT INTO messages (id, chat_id, role, content, created_at)
+     VALUES (?, ?, 'assistant', ?, ?)`,
+    [messageId, chatId, content, Date.now()]
+  );
+  await touchChat(chatId);
+}
+
+export async function getLastAssistantMessage(
+  chatId: string
+): Promise<MessageRow | undefined> {
+  const rows = await select<MessageRow>(
+    `SELECT * FROM messages WHERE chat_id = ? AND role = 'assistant'
+     ORDER BY created_at ASC, rowid ASC`,
+    [chatId]
+  );
+  return rows[rows.length - 1];
 }
 
 // Verify a chat belongs to a user (authorization helper).

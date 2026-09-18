@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useChatStore } from '@/lib/store';
 import { INTERRUPT_SUFFIX, type Message } from '@/lib/types';
+import { ApiError, extractCode, hintFor } from '@/lib/chatError';
 import { MarkdownMessage } from './MarkdownMessage';
 
 interface ChatWindowProps {
@@ -41,7 +42,7 @@ function setResumeFlag(chatId: string | null) {
 }
 
 export function ChatWindow({ className = '' }: ChatWindowProps) {
-  const { currentChatId, getCurrentChat, addMessage, updateMessage, updateMessageSources, setLoading, setError, models, modelsLoading, getModelForChat, setChatModel, streamingChats, chatStatus, setChatStreaming, setChatStatus } = useChatStore();
+  const { currentChatId, getCurrentChat, addMessage, updateMessage, updateMessageSources, setLoading, setError, dismissError, error, errorCode, localStatus, models, modelsLoading, getModelForChat, setChatModel, streamingChats, chatStatus, setChatStreaming, setChatStatus } = useChatStore();
   const [inputValue, setInputValue] = useState('');
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [messageDurations, setMessageDurations] = useState<Record<string, number>>({});
@@ -134,6 +135,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                     text?: string;
                     message?: string;
                     messageId?: string;
+                    code?: string;
                   };
                   try {
                     parsed = JSON.parse(line);
@@ -173,8 +175,11 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                     return true;
                   }
                   if (parsed.type === 'error') {
-                    const err = new Error(parsed.message || 'The generation failed') as Error & { status?: number };
-                    err.status = 400;
+                    const err = new ApiError(
+                      parsed.message || 'The generation failed',
+                      parsed.code || 'upstream_error',
+                      400
+                    );
                     throw err;
                   }
                 }
@@ -194,7 +199,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
               status === 504 ||
               error instanceof TypeError;
             if (!networkish) {
-              if (error instanceof Error) setError(error.message);
+              setError(
+                error instanceof Error ? error.message : 'The generation failed',
+                extractCode(error, 'internal')
+              );
               return false;
             }
             if (attempt < MAX_FOLLOW_ATTEMPTS) {
@@ -266,6 +274,11 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     let fullContent = '';
     // True once a terminal event (done/interrupted/error) has been seen.
     let terminal = false;
+    // True once the server replied 200 and a stream *started*. Only after this
+    // point does a lost connection mean the generation is worth following on the
+    // resume endpoint — a failure before the stream started is the real error
+    // (e.g. model did not load) and must be shown as-is, never masked by a retry.
+    let responseStarted = false;
 
     // Run the live generation request; on any mid-stream failure it throws so
     // the caller can fall back to the resume stream.
@@ -296,10 +309,24 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
         });
 
         if (!response.ok) {
-          const error = new Error(`API error: ${response.status}`) as Error & { status?: number };
-          error.status = response.status;
-          throw error;
+          let message = `API error: ${response.status}`;
+          let code: string | undefined;
+          try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+            if (data?.code) code = data.code;
+          } catch {
+            // response body is not JSON (proxy/tunnel error) — fall through
+          }
+          throw new ApiError(
+            message,
+            code || (response.status === 504 || response.status === 408 ? 'timeout' : 'upstream_error'),
+            response.status
+          );
         }
+        // A stream is now guaranteed to start server-side; from here on a
+        // failure is a mid-stream loss that the resume endpoint can recover.
+        responseStarted = true;
 
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
@@ -325,6 +352,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                 content?: string;
                 text?: string;
                 message?: string;
+                code?: string;
                 sources?: { title: string; url: string }[];
               };
               try {
@@ -343,8 +371,11 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                 continue;
               }
               if (parsed.type === 'error') {
-                const error = new Error(parsed.message || 'The agent encountered an error') as Error & { status?: number };
-                error.status = 400;
+                const error = new ApiError(
+                  parsed.message || 'The agent encountered an error',
+                  parsed.code || 'upstream_error',
+                  502
+                );
                 throw error;
               }
               if (parsed.type === 'content' && parsed.content) {
@@ -401,7 +432,11 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
         const retryable =
           status === undefined || status === 408 || status === 502 || status === 503 || status === 504;
 
-        if (!retryable) throw error;
+        // Mid-stream loss is worth following on the resume endpoint. But a
+        // failure before the stream ever started (e.g. the model failed to
+        // load) must be surfaced as-is — jumping into followGeneration would
+        // mask the real error and read as an endless "reconnecting" loop.
+        if (!retryable || !responseStarted) throw error;
 
         // The server keeps generating and saving even though we lost the
         // connection — follow the persisted state instead of restarting.
@@ -413,7 +448,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
           fullContent = content;
         });
         if (!followed && !userStoppedRef.current) {
-          setError('Lost connection to the server. The response is being saved — reload to view it.');
+          setError(
+            'Lost connection to the server. The response is being saved — reload to view it.',
+            'connection_failed'
+          );
         } else {
           terminal = true;
         }
@@ -421,17 +459,21 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     } catch (error) {
       if (!userStoppedRef.current) {
         console.error('Send message error:', error);
-        const status = (error as { status?: number }).status;
         const aborted = error instanceof DOMException && error.name === 'AbortError';
-        setError(
-          aborted
-            ? 'The response stalled and was stopped. Please try again.'
-            : status === 504
-              ? 'The model took too long to respond. Please try again.'
-              : error instanceof Error
-                ? error.message
-                : 'Failed to send message'
-        );
+        if (aborted) {
+          setError('The response stalled and was stopped. Please try again.', 'timeout');
+        } else {
+          const status = (error as { status?: number }).status;
+          const code = extractCode(
+            error,
+            error instanceof TypeError
+              ? 'connection_failed'
+              : status === 504 || status === 408
+                ? 'timeout'
+                : 'connection_failed'
+          );
+          setError(error instanceof Error ? error.message : 'Failed to send message', code);
+        }
       }
     } finally {
       const durationMs = stopTimer();
@@ -505,6 +547,31 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     <div className={`flex flex-col h-full min-h-0 ${className}`}>
       <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-4 space-y-4 sm:space-y-6">
         <div className="max-w-3xl mx-auto w-full space-y-4 sm:space-y-6">
+          {error && (
+            <div
+              role="alert"
+              className="w-full rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 flex items-start gap-3"
+            >
+              <svg className="w-5 h-5 mt-0.5 text-destructive shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              </svg>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-destructive">{hintFor(errorCode).title}</p>
+                <p className="text-sm text-foreground/90 mt-0.5">{error}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{hintFor(errorCode).hint}</p>
+              </div>
+              <button
+                type="button"
+                onClick={dismissError}
+                className="shrink-0 text-muted-foreground hover:text-foreground p-1 -m-1"
+                aria-label="Dismiss error"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )}
           {messages.map((message) => (
             <MessageBubble
               key={message.id}
@@ -549,6 +616,14 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
           </select>
           <ContextMeter used={usedTokens} total={contextWindow} />
         </div>
+        {localStatus === 'unreachable' && selectedModel && localModels.some((m) => m.id === selectedModel) && (
+          <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 text-xs text-amber-600">
+            <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span>Ollama is unreachable right now — local models may fail to respond. Try again in a minute or switch to a cloud model.</span>
+          </div>
+        )}
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <textarea
             ref={textareaRef}

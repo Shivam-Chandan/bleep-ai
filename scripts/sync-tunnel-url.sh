@@ -22,6 +22,11 @@ if [ -f "$CONFIG_FILE" ]; then
   set -a; . "$CONFIG_FILE"; set +a
 fi
 
+# A dead quick-tunnel registration ("Unauthorized: Tunnel not found") never
+# recovers by itself — restore it FIRST so the URLs below are fresh, otherwise
+# this script would keep syncing a dead URL and never notice.
+"$REPO_DIR/scripts/tunnel-watchdog.sh" || true
+
 # Tunnel name -> env key to keep in sync.
 declare -A TUNNELS=(
   [ollama]=OLLAMA_BASE_URL

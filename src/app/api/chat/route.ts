@@ -32,6 +32,11 @@ import {
   type AgentMessage,
 } from '@/lib/agent';
 import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
+import {
+  ModelError,
+  isAbortError,
+  statusForCode,
+} from '@/lib/modelErrors';
 
 // Do NOT set a low maxDuration here. Vercel counts streamed response time
 // against the function's max duration; the platform default (300s with Fluid
@@ -196,22 +201,33 @@ export async function POST(request: NextRequest) {
               : { type: 'done', messageId: answerId, content }
           );
         },
-        onError: async (message) => {
-          finalize({ type: 'error', message, messageId: answerId });
+        onError: async (message, code) => {
+          finalize({
+            type: 'error',
+            message,
+            ...(code ? { code } : {}),
+            messageId: answerId,
+          });
         },
       });
     } catch (error) {
-      // The model call failed before any stream was produced. Release the busy
-      // slot and tell any reconnected listener the generation is over.
+      // The model call failed before any stream was produced. Tell any
+      // reconnected listener the generation is over, then reply with a coded
+      // error the UI can categorize (connection vs model load, etc.).
+      const code =
+        error instanceof ModelError ? error.code : isAbortError(error) ? 'timeout' : 'internal';
+      const message =
+        error instanceof Error ? error.message : 'Generation failed';
       if (chatId) {
         publish(chatId, {
           type: 'error',
-          message: error instanceof Error ? error.message : 'Generation failed',
+          message,
+          ...(code ? { code } : {}),
           messageId: answerId,
         });
         endGeneration();
       }
-      throw error;
+      return NextResponse.json({ error: message, code }, { status: statusForCode(code) });
     }
 
     if (stream) {
@@ -243,11 +259,13 @@ export async function GET() {
     // though Ollama may have several other models pulled on the same server.
     const localModels: ChatModel[] = [];
     const configured = new Set(LOCAL_MODELS);
+    let localStatus: 'ok' | 'unreachable' = 'unreachable';
     try {
       const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
         headers: { ...ollamaAuthHeader() },
       });
       if (response.ok) {
+        localStatus = 'ok';
         const data = await response.json();
         for (const model of data.models || []) {
           if (!configured.has(model.name)) continue;
@@ -282,7 +300,7 @@ export async function GET() {
       ...(openRouterConfigured() ? CLOUD_MODELS : []),
     ];
 
-    return NextResponse.json({ defaultModel: DEFAULT_MODEL, models });
+    return NextResponse.json({ defaultModel: DEFAULT_MODEL, models, localStatus });
   } catch (error) {
     console.error('Models fetch error:', error);
     return NextResponse.json({ error: 'Failed to load models' }, { status: 500 });

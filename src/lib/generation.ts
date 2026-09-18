@@ -22,6 +22,7 @@ export interface GenerationEvent {
   messageId?: string;
   content?: string;
   message?: string;
+  code?: string;
 }
 
 const emitter = new EventEmitter();

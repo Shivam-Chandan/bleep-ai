@@ -11,6 +11,8 @@ interface ChatStore {
   isLoading: boolean;
   isHydrated: boolean;
   error: string | null;
+  errorCode: string | null;
+  localStatus: 'ok' | 'unreachable' | 'unknown';
   models: ChatModel[];
   modelsLoading: boolean;
   defaultModel: string | null;
@@ -31,7 +33,8 @@ interface ChatStore {
   updateMessage: (chatId: string, messageId: string, content: string) => void;
   updateMessageSources: (chatId: string, messageId: string, sources: Source[]) => void;
   setLoading: (loading: boolean) => void;
-  setError: (error: string | null) => void;
+  setError: (error: string | null, code?: string | null) => void;
+  dismissError: () => void;
   getCurrentChat: () => Chat | undefined;
 }
 
@@ -75,6 +78,8 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   isLoading: false,
   isHydrated: false,
   error: null,
+  errorCode: null,
+  localStatus: 'unknown',
   models: [],
   modelsLoading: false,
   defaultModel: null,
@@ -91,12 +96,15 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
       set({
         models: data.models || [],
         defaultModel: data.defaultModel || null,
+        localStatus: data.localStatus === 'ok' ? 'ok' : 'unreachable',
         modelsLoading: false,
       });
     } catch (e) {
       set({
         modelsLoading: false,
+        localStatus: 'unknown',
         error: e instanceof Error ? e.message : 'Failed to load models',
+        errorCode: 'connection_failed',
       });
     }
   },
@@ -217,7 +225,9 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   },
 
   setLoading: (loading: boolean) => set({ isLoading: loading }),
-  setError: (error: string | null) => set({ error }),
+  setError: (error: string | null, code?: string | null) =>
+    set({ error, errorCode: error ? (code ?? null) : null }),
+  dismissError: () => set({ error: null, errorCode: null }),
 
   getCurrentChat: () => {
     const { chats, currentChatId } = get();

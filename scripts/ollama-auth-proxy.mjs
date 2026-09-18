@@ -76,6 +76,15 @@ const server = http.createServer((req, res) => {
   req.pipe(proxyReq);
 });
 
+// Long local generations can take minutes (cold model loads alone reached 170s,
+// and streaming caps allow up to 300s+). Node's default request/header timeouts
+// kill the socket at those durations, which surfaces as "socket hang up" and a
+// truncated reply. Disable them so the stream lives as long as Ollama needs.
+server.requestTimeout = 0;
+server.headersTimeout = 0;
+server.keepAliveTimeout = 0;
+server.timeout = 0;
+
 server.listen(PORT, HOST, () => {
   console.log(`Ollama auth proxy listening on http://${HOST}:${PORT} -> ${UPSTREAM}`);
 });

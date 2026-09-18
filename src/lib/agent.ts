@@ -3,6 +3,7 @@ import { OLLAMA_BASE_URL, ollamaAuthHeader } from './ollama';
 import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
 import { INTERRUPT_SUFFIX } from './types';
+import { ModelError, isAbortError, isModelError, modelFetch, type ModelErrorCode } from './modelErrors';
 
 // ---------- Types ----------
 
@@ -241,7 +242,7 @@ async function callModel(params: ModelCallParams): Promise<Response> {
   if (params.tools?.length) common.tools = params.tools;
 
   if (params.isCloud) {
-    return fetch(openRouterChatUrl(), {
+    return modelFetch(openRouterChatUrl(), {
       method: 'POST',
       headers: openRouterHeaders(),
       body: JSON.stringify({
@@ -252,7 +253,7 @@ async function callModel(params: ModelCallParams): Promise<Response> {
     });
   }
 
-  return fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+  return modelFetch(`${OLLAMA_BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...ollamaAuthHeader() },
     body: JSON.stringify({
@@ -268,13 +269,6 @@ async function callModel(params: ModelCallParams): Promise<Response> {
     }),
     ...(params.signal ? { signal: params.signal } : {}),
   });
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    (error instanceof DOMException && error.name === 'AbortError') ||
-    (error instanceof Error && error.name === 'AbortError')
-  );
 }
 
 function combineSignals(signal: AbortSignal | undefined, ms: number): AbortSignal {
@@ -391,7 +385,17 @@ async function pipeModelStream(
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        const delta = parse(line);
+        let delta: StreamDelta | null;
+        try {
+          delta = parse(line);
+        } catch (e) {
+          // The stream reported an error (e.g. OpenRouter sent {"error": …}).
+          throw new ModelError(
+            'upstream_error',
+            e instanceof Error ? e.message : 'Model stream error',
+            502
+          );
+        }
         if (!delta) continue;
         if (delta.done) {
           finished = true;
@@ -409,8 +413,15 @@ async function pipeModelStream(
     if (isAbortError(error) || signal?.aborted) {
       interrupted = true;
       await reader.cancel().catch(() => {});
-    } else {
+    } else if (isModelError(error)) {
       throw error;
+    } else {
+      // The connection to the model server dropped mid-stream.
+      throw new ModelError(
+        'connection_failed',
+        'Connection to the model server was lost mid-stream.',
+        502
+      );
     }
   } finally {
     emit({ type: 'done' });
@@ -435,7 +446,7 @@ export interface AgentResponseOptions {
   onAssistantChunk?: (content: string) => void | Promise<void>;
   // Called when the model call fails mid-stream so the caller can finalise
   // (e.g. notify reconnected listeners) instead of leaving it running.
-  onError?: (message: string) => void | Promise<void>;
+  onError?: (message: string, code?: ModelErrorCode) => void | Promise<void>;
 }
 
 export interface PreparedResponse {
@@ -542,7 +553,6 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         signal: upstream.signal,
       });
     }
-    if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
   } else {
     // Cloud path: tool calling is near-instant, so let the model decide whether a
     // search is warranted, falling back to search-then-answer if tools are unsupported.
@@ -569,7 +579,6 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             options,
             signal: combineSignals(upstream.signal, DECISION_TIMEOUT_MS),
           });
-          if (!res.ok) throw new Error(`Model API error: ${res.status}`);
 
           decision = await parseDecision(isCloud, res);
           const searchCall = decision.toolCalls.find((c) => c.name === 'web_search');
@@ -604,7 +613,6 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             options,
             signal: upstream.signal,
           });
-          if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
           break;
         }
 
@@ -625,7 +633,6 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           options,
           signal: upstream.signal,
         });
-        if (!streamable.ok) throw new Error(`Model API error: ${streamable.status}`);
       } catch (e) {
         fallbackError = e;
         if (attempt === 0 && !isAbortError(e)) continue;
@@ -696,8 +703,9 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
       } catch (e) {
         console.error('Agent stream error:', e);
         const message = e instanceof Error ? e.message : 'Streaming error';
-        emit({ type: 'error', message });
-        await opts.onError?.(message);
+        const code = isModelError(e) ? e.code : isAbortError(e) ? 'timeout' : undefined;
+        emit({ type: 'error', message, ...(code ? { code } : {}) });
+        await opts.onError?.(message, code);
         try {
           await persistChain;
           await opts.onAssistantContent(assistantContent);

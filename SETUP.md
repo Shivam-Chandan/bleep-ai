@@ -194,7 +194,60 @@ rm cj.txt
 
 ---
 
-## 7. Security notes
+## 7a. Digest worker (box-side LLM generation)
+
+The daily digest's LLM generation runs **here, on this laptop**, not in the
+Vercel function. A realistic day's briefing takes minutes on this box's GPU —
+past what a serverless function can hold open — so `POST /api/digest/run`
+(called by the Google Apps Script scraper) and the Vercel cron
+(`/api/digest/summarize`) now only enqueue a row in the `digest_runs` table
+and return instantly. This worker polls that table, generates locally against
+`http://localhost:11434` with no deadline, and writes the result straight to
+the same Turso database the Next app reads from.
+
+### Setup
+
+```bash
+git pull
+npm ci   # picks up @libsql/client if not already installed
+
+# Uses the SAME .env.local as the app (needs TURSO_DATABASE_URL,
+# TURSO_AUTH_TOKEN, OLLAMA_MODEL; DIGEST_CONTEXT_WINDOW and
+# DIGEST_WORKER_POLL_SECONDS are optional, see scripts/digest-worker.mjs).
+# OLLAMA_LOCAL_URL/OLLAMA_AUTH_TOKEN are only needed if this worker runs
+# somewhere other than the Ollama box itself — normally it talks straight to
+# http://127.0.0.1:11434 with no auth.
+sudo cp scripts/bleep-digest-worker.service /etc/systemd/system/
+# Edit WorkingDirectory/EnvironmentFile in that file if this repo isn't at
+# /home/<user>/bleep-ai-chat.
+sudo systemctl daemon-reload
+sudo systemctl enable --now bleep-digest-worker
+journalctl -u bleep-digest-worker -f   # watch it pick up the next run
+```
+
+### Keeping the model always resident
+
+`warm-ollama.sh`'s timer pins `OLLAMA_MODEL` in GPU memory with
+`keep_alive: -1` so there's no cold-start on the worker's first request. It
+now also pins with `num_ctx` matching `DIGEST_CONTEXT_WINDOW` (default 8192)
+— if these two ever drift apart, Ollama silently reloads the model on every
+digest run (~15s tax). Keep them equal.
+
+This GPU has room for exactly one 3B-class model fully-plus-offloaded at
+`num_gpu=24` — a second model resident alongside it (e.g. left over from
+testing a smaller one) steals VRAM from the one you actually want fast.
+`warm-ollama.sh` now unloads any resident model that isn't in
+`OLLAMA_MODELS`/`OLLAMA_MODEL` on every tick, so this self-corrects within
+one warm cycle even if something else loads a model in the meantime.
+
+### Failure visibility
+
+Each `digest_runs` row has a `status` (`pending` → `processing` → `done` /
+`failed`) and an `error` column. A worker that dies mid-generation leaves its
+row `processing`; the next poll cycle requeues anything stuck for more than
+`DIGEST_WORKER_STALE_MS` (default 30 min) back to `pending` automatically.
+
+## 7b. Security notes
 - Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` in production.
 - Passwords are bcrypt-hashed (never stored in plaintext) and must be ≥ 10 characters.
 - Login is limited to 10 failed attempts per username and 20 per IP per 15 minutes;

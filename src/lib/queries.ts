@@ -420,3 +420,115 @@ export async function listDigestSummariesPage(
   const nextCursor = hasMore ? days[days.length - 1].day : null;
   return { days, nextCursor };
 }
+
+// ---------- Digest run queue ----------
+// Generation happens on the box (scripts/digest-worker.mjs), not inside a
+// Vercel function — see that script for why. These helpers are the handoff:
+// the Next app only ever enqueues/reads; only the worker claims and writes.
+
+export type DigestRunStatus = 'pending' | 'processing' | 'done' | 'failed';
+
+export interface DigestRunRow {
+  id: string;
+  user_id: string;
+  day: string;
+  status: DigestRunStatus;
+  error: string | null;
+  requested_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+// Idempotent: re-requesting a day that's pending/processing is a no-op (the
+// existing row is left alone so it isn't reset mid-flight); re-requesting a
+// done/failed day resets it back to pending so the worker regenerates it.
+export async function enqueueDigestRun(
+  userId: string,
+  day: string
+): Promise<string> {
+  const existing = await select<{ id: string }>(
+    `SELECT id FROM digest_runs WHERE user_id = ? AND day = ?`,
+    [userId, day]
+  );
+  const now = Date.now();
+  if (existing[0]) {
+    await execute(
+      `UPDATE digest_runs
+       SET status = 'pending', error = NULL, requested_at = ?,
+           started_at = NULL, finished_at = NULL
+       WHERE id = ? AND status IN ('done', 'failed')`,
+      [now, existing[0].id]
+    );
+    return existing[0].id;
+  }
+  const id = randomUUID();
+  await execute(
+    `INSERT INTO digest_runs (id, user_id, day, status, requested_at)
+     VALUES (?, ?, ?, 'pending', ?)`,
+    [id, userId, day, now]
+  );
+  return id;
+}
+
+export async function getDigestRun(
+  id: string
+): Promise<DigestRunRow | undefined> {
+  const rows = await select<DigestRunRow>(
+    `SELECT * FROM digest_runs WHERE id = ?`,
+    [id]
+  );
+  return rows[0];
+}
+
+export async function listPendingDigestRuns(
+  limit = 10
+): Promise<DigestRunRow[]> {
+  return select<DigestRunRow>(
+    `SELECT * FROM digest_runs WHERE status = 'pending'
+     ORDER BY requested_at ASC LIMIT ?`,
+    [limit]
+  );
+}
+
+// Atomic claim: only succeeds if the row is still 'pending' (guards against
+// two worker instances racing on the same row). Returns true on success.
+export async function claimDigestRun(id: string): Promise<boolean> {
+  const info = await execute(
+    `UPDATE digest_runs SET status = 'processing', started_at = ?
+     WHERE id = ? AND status = 'pending'`,
+    [Date.now(), id]
+  );
+  return info.rowsAffected > 0;
+}
+
+export async function markDigestRunDone(id: string): Promise<void> {
+  await execute(
+    `UPDATE digest_runs SET status = 'done', finished_at = ?, error = NULL
+     WHERE id = ?`,
+    [Date.now(), id]
+  );
+}
+
+export async function markDigestRunFailed(
+  id: string,
+  error: string
+): Promise<void> {
+  await execute(
+    `UPDATE digest_runs SET status = 'failed', finished_at = ?, error = ?
+     WHERE id = ?`,
+    [Date.now(), error.slice(0, 2000), id]
+  );
+}
+
+// Crash recovery: a worker that dies mid-generation leaves its row stuck in
+// 'processing' forever. Called at the start of each poll cycle to reclaim
+// rows that have been "processing" for longer than any real generation
+// should take.
+export async function requeueStaleDigestRuns(maxAgeMs: number): Promise<number> {
+  const info = await execute(
+    `UPDATE digest_runs SET status = 'pending', started_at = NULL
+     WHERE status = 'processing' AND started_at < ?`,
+    [Date.now() - maxAgeMs]
+  );
+  return info.rowsAffected;
+}

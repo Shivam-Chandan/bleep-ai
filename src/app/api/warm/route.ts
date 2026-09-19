@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { OLLAMA_BASE_URL, OLLAMA_MODEL, ollamaAuthHeader } from '@/lib/ollama';
+import { OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_NUM_THREAD, ollamaAuthHeader } from '@/lib/ollama';
 import { checkHealthAccess } from '@/lib/auth';
 
 const DEFAULT_MODEL = OLLAMA_MODEL;
@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
         prompt: '',
         stream: false,
         keep_alive: -1,
-        options: { num_predict: 1, num_ctx: contextWindow, num_gpu: 24 },
+        options: { num_predict: 1, num_ctx: contextWindow, num_gpu: 24, num_thread: OLLAMA_NUM_THREAD },
       }),
     });
 

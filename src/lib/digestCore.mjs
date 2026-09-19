@@ -21,6 +21,9 @@ export const ZOOM_SUMMARY_CHARS = 1500;
 // finishing a full-length briefing is fine.
 export const OUTPUT_TOKENS = 1536;
 export const CONTEXT_WINDOW = Number(process.env.DIGEST_CONTEXT_WINDOW) || 8192;
+// Physical cores, not logical — same reasoning as src/lib/ollama.ts (the box
+// is 2C/4T and 4 auto-detected threads saturate the CPU during generation).
+export const NUM_THREAD = Number(process.env.OLLAMA_NUM_THREAD) || 2;
 // Hard char ceiling on the raw-data block so we never overflow the window even
 // with many long items (~4 chars/token; leave headroom for output + prompt).
 export const MAX_PROMPT_CHARS = 26_000;
@@ -186,6 +189,7 @@ export async function callDigestModel({
   prompt,
   contextWindow = CONTEXT_WINDOW,
   outputTokens = OUTPUT_TOKENS,
+  numThread = NUM_THREAD,
   timeoutMs = 30 * 60_000,
 }) {
   const res = await fetch(`${baseUrl}/api/chat`, {
@@ -200,6 +204,7 @@ export async function callDigestModel({
         temperature: 0.4,
         num_ctx: contextWindow,
         num_predict: outputTokens,
+        num_thread: numThread,
       },
     }),
     signal: AbortSignal.timeout(timeoutMs),

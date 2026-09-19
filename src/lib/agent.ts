@@ -1,5 +1,5 @@
 import 'server-only';
-import { OLLAMA_BASE_URL, ollamaAuthHeader } from './ollama';
+import { OLLAMA_BASE_URL, OLLAMA_NUM_THREAD, ollamaAuthHeader } from './ollama';
 import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
 import { INTERRUPT_SUFFIX } from './types';
@@ -275,6 +275,9 @@ async function callModel(params: ModelCallParams): Promise<Response> {
         // (~1GB of VRAM left idle). Measured on this box: 24 layers fills
         // ~1887MiB (70% GPU) and loads stably; 28+ fails with CUDA OOM.
         num_gpu: 24,
+        // Physical cores, not logical (see src/lib/ollama.ts) — keeps the
+        // 2C/4T box responsive during long generations.
+        num_thread: OLLAMA_NUM_THREAD,
         ...params.options,
         num_predict: params.maxTokens ?? 2048,
       },

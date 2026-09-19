@@ -20,6 +20,9 @@ BASE_URL="${OLLAMA_WARM_URL:-http://localhost:11434}"
 # Comma-separated list (OLLAMA_MODELS), falling back to a single OLLAMA_MODEL.
 MODELS="${OLLAMA_MODELS:-${OLLAMA_MODEL:-qwen2.5:3b}}"
 NUM_CTX="${DIGEST_CONTEXT_WINDOW:-8192}"
+# Physical-core count so the warm call doesn't spin up 4 logical threads on
+# this 2C/4T box (see src/lib/ollama.ts / digestCore.mjs for the same default).
+NUM_THREAD="${OLLAMA_NUM_THREAD:-2}"
 
 # Only one warm-up at a time (boot service and the 5-min timer can overlap).
 LOCK_FILE="/tmp/bleep-warm-ollama.lock"
@@ -39,10 +42,10 @@ IFS=',' read -ra MODEL_LIST <<< "$MODELS"
 for MODEL in "${MODEL_LIST[@]}"; do
   MODEL="$(printf '%s' "$MODEL" | xargs)"  # trim surrounding whitespace
   [ -n "$MODEL" ] || continue
-  echo "Warming ${MODEL} via ${BASE_URL} (num_ctx=${NUM_CTX})..."
+  echo "Warming ${MODEL} via ${BASE_URL} (num_ctx=${NUM_CTX}, num_thread=${NUM_THREAD})..."
   if body="$(curl -fsS --connect-timeout 5 --max-time 600 -X POST "${BASE_URL}/api/generate" \
     -H 'Content-Type: application/json' \
-    -d "{\"model\":\"${MODEL}\",\"prompt\":\"\",\"stream\":false,\"keep_alive\":-1,\"options\":{\"num_predict\":1,\"num_gpu\":24,\"num_ctx\":${NUM_CTX}}}" \
+    -d "{\"model\":\"${MODEL}\",\"prompt\":\"\",\"stream\":false,\"keep_alive\":-1,\"options\":{\"num_predict\":1,\"num_gpu\":24,\"num_ctx\":${NUM_CTX},\"num_thread\":${NUM_THREAD}}}" \
     2>&1)"; then
     echo "Warmed ${MODEL}"
   else

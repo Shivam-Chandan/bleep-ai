@@ -116,14 +116,37 @@ function currentDate(): string {
 
 function baseSystem(verbosity: VerbosityPlan): string {
   return (
-    `You are Bleep AI, a helpful assistant. Today's date is ${currentDate()}. ` +
-    `Respond using the model you are running on unless the conversation or web results indicate otherwise.\n\n` +
+    `You are Bleep AI, a friendly, down-to-earth assistant. Today's date is ${currentDate()}.\n\n` +
+    `Voice: write the way a smart friend texts you back — warm, plain, direct, no corporate polish. ` +
+    `Use contractions and everyday words, keep sentences short, and match the user's language and energy. ` +
+    `Answer from your own knowledge, using web results when they're provided. Write in flowing prose; use ` +
+    `markdown (headings, bullets, code blocks) ONLY when it genuinely helps (steps, lists, code, comparisons). ` +
+    `Never open with canned phrases like "As an AI assistant" and never sign off.\n\n` +
     verbosity.instruction
   );
 }
 
-function systemWithContext(context: string): string {
-  return `You are Bleep AI, a helpful assistant. Today's date is ${currentDate()}.\n\n${context}`;
+function systemWithContext(context: string, userName?: string): string {
+  return (
+    `You are Bleep AI, a friendly, down-to-earth assistant. Today's date is ${currentDate()}.\n\n` +
+    `Voice: write the way a smart friend texts you back — warm, plain, direct, no corporate polish. ` +
+    `Use contractions and everyday words, keep sentences short, and match the user's language and energy. ` +
+    `Write in flowing prose; use markdown ONLY when it genuinely helps. Never open with canned phrases ` +
+    `like "As an AI assistant" and never sign off.\n\n${context}${userIntro(userName)}`
+  );
+}
+
+// Give the model the caller's name as a personal touch. Deliberately framed as
+// "occasionally" so the model addresses the user by name sometimes — not in
+// every message, which reads as canned/corporate.
+function userIntro(userName?: string): string {
+  const name = userName?.trim();
+  if (!name) return '';
+  return (
+    `\n\nThe person you are talking to goes by the name ${name}. Weave their name in occasionally ` +
+    `for a personal touch — now and then, not in every reply, and only where it feels natural, ` +
+    `the way a friend would.`
+  );
 }
 
 // ---------- History trimming ----------
@@ -186,7 +209,7 @@ export function detectVerbosity(messages: AgentMessage[]): VerbosityPlan {
       tier: 'terse',
       maxTokens: 150,
       instruction:
-        'Answer in at most 1-2 short sentences. No filler, no preamble, no bullet points unless required.',
+        'Aim for a crisp, conversational reply of 1-2 short sentences. Sound like a person, not a memo: no bullet points, no headings, no sign-off.',
     };
   }
   if (q.length > 240 || DETAILED_HINTS.some((re) => re.test(q)) || (q.includes('?') && words.length >= 10)) {
@@ -194,15 +217,14 @@ export function detectVerbosity(messages: AgentMessage[]): VerbosityPlan {
       tier: 'detailed',
       maxTokens: 2000,
       instruction:
-        'Give a thorough, well-structured answer with clear sections, concrete examples, and steps where useful. ' +
-        'Be complete but avoid fluff.',
+        'Give a thorough, well-organised answer with a natural, friendly tone. Use headings or bullets only where they genuinely aid clarity (steps, comparisons, code); otherwise write in clear flowing prose.',
     };
   }
   return {
     tier: 'balanced',
     maxTokens: 600,
     instruction:
-      'Be concise and directly answer the question in short paragraphs. Add detail or examples only when the question clearly requires them.',
+      'Give a natural, conversational answer in a short paragraph or two. Sound like a helpful friend, not a support doc: short sentences and only as much formatting as the question really needs.',
   };
 }
 
@@ -267,8 +289,9 @@ async function callModel(params: ModelCallParams): Promise<Response> {
       ...common,
       keep_alive: -1,
       options: {
-        temperature: 0.7,
+        temperature: 0.9,
         top_p: 0.9,
+        repeat_penalty: 1.1,
         num_ctx: params.contextWindow,
         // Fill GPU VRAM first, spill remaining layers to CPU RAM. Auto (-1) is
         // overly conservative on this 2GB 840M and only placed 5/36 layers
@@ -455,6 +478,9 @@ export interface AgentResponseOptions {
   contextWindow: number;
   options?: Record<string, unknown>;
   signal?: AbortSignal;
+  // The logged-in user's name, woven into the system prompt occasionally so
+  // replies can feel personal without sounding like a mail-merge template.
+  userName?: string;
   onAssistantContent: (content: string) => void | Promise<void>;
   // Called with the full accumulated answer after every streamed chunk so the
   // caller can persist the partial response incrementally.
@@ -504,7 +530,7 @@ function capVerbosity(verbosity: VerbosityPlan, maxTokens: number): VerbosityPla
 }
 
 export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<PreparedResponse> {
-  const { isCloud, model, messages, options } = opts;
+  const { isCloud, model, messages, options, userName } = opts;
   const contextWindow = opts.contextWindow || DEFAULT_CONTEXT_WINDOW;
 
   const effective = isCloud ? opts.verbosity : capVerbosity(opts.verbosity, LOCAL_MAX_ANSWER_TOKENS);
@@ -545,7 +571,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         messages: [
           {
             role: 'system',
-            content: `${baseSystem(fitted)}\n\n${formatSearchContext(sources)}`,
+            content: `${baseSystem(fitted)}${userIntro(userName)}\n\n${formatSearchContext(sources)}`,
           },
           ...history,
         ],
@@ -560,7 +586,10 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
       streamable = await callModel({
         isCloud,
         model,
-        messages: [{ role: 'system', content: baseSystem(fitted) }, ...history],
+        messages: [
+          { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
+          ...history,
+        ],
         stream: true,
         contextWindow,
         maxTokens: fitted.maxTokens,
@@ -580,7 +609,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             isCloud,
             model,
             messages: [
-              { role: 'system', content: `${baseSystem(fitted)}\n\n` +
+              { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}\n\n` +
                 'Decide whether to use the web_search tool. Call it only when the answer needs ' +
                 'current, real-world, or web-based information (news, recent events, prices, live data, ' +
                 'external docs). Do NOT call it for greetings, simple math, general knowledge you are ' +
@@ -606,7 +635,10 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             streamable = await callModel({
               isCloud,
               model,
-              messages: [{ role: 'system', content: baseSystem(fitted) }, ...history],
+              messages: [
+                { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
+                ...history,
+              ],
               stream: true,
               contextWindow,
               maxTokens: fitted.maxTokens,
@@ -630,7 +662,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             isCloud,
             model,
             messages: [
-              { role: 'system', content: baseSystem(fitted) },
+              { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
               ...history,
               { role: 'assistant', content: decision.content, tool_calls: decision.toolCalls },
               toolResultMessage(isCloud, searchCall, toolResult),
@@ -652,7 +684,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           isCloud,
           model,
           messages: [
-            { role: 'system', content: systemWithContext(formatSearchContext(sources)) },
+            { role: 'system', content: systemWithContext(formatSearchContext(sources), userName) },
             ...history,
           ],
           stream: true,

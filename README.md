@@ -76,6 +76,17 @@ The URL stays active across reboots (config is stored in Tailscale's state DB
 and re-applied by `bleep-funnel.service` on boot). Bearer-token auth still gates
 every request — a no-token curl gets `401`.
 
+#### Watchdog: self-healing the Funnel
+
+The Funnel can silently stop serving public traffic (stale control-plane state,
+or tailscaled losing its control/DERP path after an interface/gateway change)
+while still working from inside the tailnet — prod then fails `/api/health` at
+~320ms. `bleep-tailscale-watchdog.timer` (every minute) runs
+`scripts/tailscale-watchdog.sh`, which pings prod health and, after 3
+consecutive failures (outside a 5-min cooldown), escalates: restart tailscaled →
+re-assert the funnel → `tailscale funnel reset` + re-issue if still failing, then
+re-checks. State lives in `/tmp/bleep-tailscale-watchdog/`.
+
 ### 3. Configure Vercel Environment Variables
 
 In your Vercel project settings, add (one time — the URL never changes):
@@ -113,7 +124,9 @@ bleep-ai-chat/
 │       ├── store.ts               # Zustand state management
 │       └── types.ts               # TypeScript types
 ├── scripts/
-│   └── setup-tunnel.sh            # Tailscale funnel setup
+│   ├── setup-tunnel.sh            # Tailscale funnel setup
+│   ├── tunnel-watchdog.sh         # Cloudflare quick-tunnel watchdog
+│   └── tailscale-watchdog.sh      # Restarts tailscaled/funnel when prod health fails
 ├── .env.example                   # Environment template
 └── .env.local                     # Local config (gitignored)
 ```

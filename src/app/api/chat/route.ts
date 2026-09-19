@@ -177,6 +177,7 @@ export async function POST(request: NextRequest) {
         model,
         messages: agentMessages,
         verbosity,
+        userName: auth.username,
         contextWindow: getContextWindow(model),
         options: options as Record<string, unknown> | undefined,
         signal: genController.signal,

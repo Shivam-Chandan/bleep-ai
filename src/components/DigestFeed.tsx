@@ -79,7 +79,7 @@ export function DigestFeed({
   return (
     <div className="space-y-8">
       {days.map((d) => (
-        <article key={d.day} className="space-y-2">
+        <article key={d.day} className="space-y-2 animate-message-in">
           <h2 className="text-sm font-medium text-muted-foreground">
             {formatDay(d.day)}
           </h2>

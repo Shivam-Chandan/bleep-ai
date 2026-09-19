@@ -21,7 +21,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
   const router = useRouter();
 
   const handleOpenAccount = () => {
-    router.push('/account');
+    router.push('/account', { transitionTypes: ['nav-forward'] });
     onNavigate?.();
   };
 
@@ -31,7 +31,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
   };
 
   const handleOpenDigest = () => {
-    router.push('/digest');
+    router.push('/digest', { transitionTypes: ['nav-forward'] });
     onNavigate?.();
   };
 
@@ -69,7 +69,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
       <div className="p-4 border-b space-y-2">
         <button
           onClick={handleNewChat}
-          className="w-full flex items-center gap-3 px-3 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 active:bg-primary/80 transition-colors"
+          className="w-full flex items-center gap-3 px-3 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 active:bg-primary/80 active:scale-[0.98] transition"
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -79,7 +79,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
 
         <button
           onClick={handleOpenDigest}
-          className="w-full flex items-center gap-3 px-3 py-2.5 border border-border text-foreground rounded-xl hover:bg-muted active:bg-muted transition-colors"
+          className="w-full flex items-center gap-3 px-3 py-2.5 border border-border text-foreground rounded-xl hover:bg-muted active:bg-muted active:scale-[0.98] transition"
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
@@ -99,7 +99,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
             {chats.map((chat) => (
               <li key={chat.id}>
                 <div
-                  className={`w-full flex items-center gap-2 px-3 py-3 sm:py-2.5 rounded-xl transition-colors text-left cursor-pointer ${
+                  className={`w-full flex items-center gap-2 px-3 py-3 sm:py-2.5 rounded-xl transition text-left cursor-pointer active:scale-[0.985] ${
                     currentChatId === chat.id
                       ? 'bg-primary/10 text-primary'
                       : 'text-muted-foreground hover:bg-muted active:bg-muted'

@@ -6,6 +6,7 @@ import { INTERRUPT_SUFFIX, type Message } from '@/lib/types';
 import { ApiError, extractCode, hintFor } from '@/lib/chatError';
 import { parseSseLine } from '@/lib/sse';
 import { MarkdownMessage } from './MarkdownMessage';
+import { MessageSkeleton } from './Skeleton';
 
 interface ChatWindowProps {
   className?: string;
@@ -599,27 +600,30 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
             </div>
           )}
           {isMessagesLoading && (
-            <div
-              role="status"
-              aria-live="polite"
-              className="flex items-center gap-2 text-sm text-muted-foreground"
-            >
-              <span className="w-3 h-3 rounded-full border-2 border-muted-foreground/40 border-t-transparent animate-spin" />
-              Loading conversation…
+            <div role="status" aria-live="polite" className="space-y-4" aria-label="Loading conversation">
+              <MessageSkeleton align="end" />
+              <MessageSkeleton align="start" />
+              <MessageSkeleton align="start" />
+              <span className="sr-only">Loading conversation…</span>
             </div>
           )}
-          {messages.map((message) => {
-            const isLast = message.id === messages[messages.length - 1]?.id;
-            return (
-              <MessageBubble
-                key={message.id}
-                message={message}
-                durationMs={messageDurations[message.id]}
-                isStreaming={isStreaming && isLast}
-                statusText={isStreaming && isLast ? statusText : null}
-              />
-            );
-          })}
+          <div
+            key={currentChatId}
+            className="max-w-3xl mx-auto w-full space-y-4 sm:space-y-6 animate-chat-thread"
+          >
+            {messages.map((message) => {
+              const isLast = message.id === messages[messages.length - 1]?.id;
+              return (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  durationMs={messageDurations[message.id]}
+                  isStreaming={isStreaming && isLast}
+                  statusText={isStreaming && isLast ? statusText : null}
+                />
+              );
+            })}
+          </div>
         </div>
         <div ref={messagesEndRef} />
       </div>
@@ -787,10 +791,15 @@ const MessageBubble = memo(function MessageBubble({
   // loading state ("Searching the web…" when the prompt hit web search,
   // otherwise "Thinking…") instead of an empty bubble.
   const thinking = isStreaming && message.content.trim() === '';
+  // While tokens are landing, let the bubble grow smoothly instead of
+  // snapping on every chunk.
+  const growing = isStreaming && !thinking;
   return (
     <div className={`flex gap-3 animate-message-in ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-4 py-3 ${
+          growing ? 'streaming-grow' : ''
+        } ${
           message.role === 'user'
             ? 'bg-primary text-primary-foreground rounded-br-md'
             : 'bg-muted rounded-bl-md'
@@ -800,7 +809,11 @@ const MessageBubble = memo(function MessageBubble({
           thinking ? (
             <ThinkingIndicator statusText={statusText ?? null} />
           ) : (
-            <MarkdownMessage content={message.content} reveal={isStreaming} />
+            <MarkdownMessage
+              key={isStreaming ? 'streaming' : 'done'}
+              content={message.content}
+              reveal={isStreaming}
+            />
           )
         ) : (
           <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed">{message.content}</div>

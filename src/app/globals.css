@@ -101,29 +101,260 @@ body {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+/* ============================================================
+   Motion tokens
+   ============================================================ */
+:root {
+  --motion-ease-snappy: cubic-bezier(0.22, 0.8, 0.32, 1);
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* shorter, softer update cadence across the app */
+  --dur-fast: 150ms;
+  --dur-snappy: 220ms;
+  --dur-med: 320ms;
+  --dur-slow: 450ms;
+}
+
+/* ============================================================
+   View Transitions API
+   Animations only play where the browser supports them.
+   ============================================================ */
+::view-transition {
+  pointer-events: none;
+}
+
+/* Sketch full root-of-page crossfades with a faint blur: it is the default
+   animation for any old/new snapshot pair that does not have its own type. */
+::view-transition-old(root) {
+  animation: 160ms ease-out both vt-fade reverse;
+}
+::view-transition-new(root) {
+  animation: 240ms ease-in both vt-fade;
+}
+
+/* Directional slides for typed navigations (nav-forward / nav-back).
+   Old content leaves quickly on one side, new content enters from the
+   opposite side with a short delay so the two never fight. */
+::view-transition-old(.nav-forward) {
+  --slide-offset: -60px;
+  animation:
+    150ms ease-in both vt-fade reverse,
+    380ms var(--motion-ease-snappy) both vt-slide-x reverse;
+}
+::view-transition-new(.nav-forward) {
+  --slide-offset: 60px;
+  animation:
+    210ms ease-out 150ms both vt-fade,
+    380ms var(--motion-ease-snappy) both vt-slide-x;
+}
+::view-transition-old(.nav-back) {
+  --slide-offset: 60px;
+  animation:
+    150ms ease-in both vt-fade reverse,
+    380ms var(--motion-ease-snappy) both vt-slide-x reverse;
+}
+::view-transition-new(.nav-back) {
+  --slide-offset: -60px;
+  animation:
+    210ms ease-out 150ms both vt-fade,
+    380ms var(--motion-ease-snappy) both vt-slide-x;
+}
+
+/* Suspense-reveal handoff: skeletons exit down+fast, real content enters
+   up+gentler. The delayed new-content fade reads as a handoff. */
+::view-transition-old(.reveal-exit) {
+  animation:
+    150ms ease-out both vt-fade reverse,
+    150ms ease-out both vt-slide-y reverse;
+}
+::view-transition-new(.reveal-enter) {
+  animation:
+    210ms ease-in 150ms both vt-fade,
+    320ms var(--motion-ease-snappy) both vt-slide-y;
+}
+
+@keyframes vt-fade {
+  from { filter: blur(3px); opacity: 0; }
+  to { filter: blur(0); opacity: 1; }
+}
+
+@keyframes vt-slide-x {
+  from { translate: var(--slide-offset, 60px); }
+  to { translate: 0; }
+}
+
+@keyframes vt-slide-y {
+  from { translate: 0 10px; }
+  to { translate: 0 0; }
+}
+
+/* ============================================================
+   Skeleton shimmer
+   ============================================================ */
+@keyframes skeleton-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--muted);
+  border-radius: 8px;
+  color: transparent;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--muted-foreground) 12%, transparent),
+    transparent
+  );
+  animation: skeleton-shimmer 1.5s infinite ease-in-out;
+}
+
+/* Stagger several skeleton blocks on the same row. */
+.skeleton-row {
+  display: flex;
+  gap: 0.75rem;
+}
+.skeleton-row > .skeleton:nth-child(1) { animation-delay: 0ms; }
+.skeleton-row > .skeleton:nth-child(2) { animation-delay: 80ms; }
+.skeleton-row > .skeleton:nth-child(3) { animation-delay: 160ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+    opacity: 0.35;
+  }
+}
+
+/* ============================================================
+   App boot / route content
+   ============================================================ */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-rise {
+  animation: rise-in var(--dur-med) var(--motion-ease-snappy);
+}
+
+@keyframes app-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-app-in {
+  animation: app-in 320ms var(--motion-ease-out);
+}
+
+/* ============================================================
+   Messages
+   ============================================================ */
+/* Gentle rise+fade when a message bubble first appears. */
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-message-in {
+  animation: message-in 0.32s var(--motion-ease-snappy) both;
+}
+
 /* Soft fade-in for new words as they stream in. */
 @keyframes stream-reveal {
-  0% { opacity: 0; }
-  100% { opacity: 1; }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .animate-stream-reveal {
   animation: stream-reveal 0.45s ease-out;
 }
 
-/* Gentle rise+fade when a message bubble first appears. */
-@keyframes message-in {
-  0% { opacity: 0; transform: translateY(6px); }
-  100% { opacity: 1; transform: translateY(0); }
+/* Crossfade the freshly-arrived markdown in when streaming finishes and the
+   plain-text render gives way to the real renderer. */
+@keyframes markdown-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-.animate-message-in {
-  animation: message-in 0.35s ease-out;
+.animate-markdown-in {
+  animation: markdown-in var(--dur-snappy) var(--motion-ease-snappy);
 }
 
+/* One container re-mounts per chat: animate the whole thread together,
+   giving "loading a chat from memory" a single cohesive entrance. */
+@keyframes chat-thread-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-chat-thread {
+  animation: chat-thread-in 260ms var(--motion-ease-snappy);
+}
+
+/* The actively-streaming assistant bubble grows smoothly instead of the
+   height snapping on every token. `interpolate-size` lets an `auto` height
+   animate; overflowing still paints (overflow hidden only while streaming). */
+.streaming-grow {
+  interpolate-size: allow-keywords;
+  transition: height var(--dur-snappy) var(--motion-ease-snappy);
+  overflow: hidden;
+}
+
+/* Subtle fade shift used when a chat's message thread is replaced. */
+@keyframes opacity-shift {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+.animate-shift {
+  animation: opacity-shift 200ms var(--motion-ease-out);
+}
+
+/* ============================================================
+   Inputs & interactive polish
+   ============================================================ */
+textarea,
+input,
+select {
+  transition:
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+textarea:focus,
+input:focus {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 60%, transparent);
+}
+
+/* ============================================================
+   Reduced motion
+   ============================================================ */
 @media (prefers-reduced-motion: reduce) {
-  .animate-stream-reveal,
-  .animate-message-in {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .skeleton::after {
     animation: none;
+  }
+
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
   }
 }

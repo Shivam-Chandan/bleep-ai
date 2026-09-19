@@ -59,7 +59,7 @@ export const MarkdownMessage = memo(function MarkdownMessage({
     );
   }
   return (
-    <div className={WRAPPER_CLASS}>
+    <div className={`${WRAPPER_CLASS} animate-markdown-in`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {content}
       </ReactMarkdown>

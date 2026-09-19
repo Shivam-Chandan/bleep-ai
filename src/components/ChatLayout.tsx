@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useChatStore } from '@/lib/store';
 import { ChatWindow } from './ChatWindow';
 import { ChatSidebar } from './ChatSidebar';
+import { AppSkeleton } from './Skeleton';
 
 export function ChatLayout({ username }: { username?: string }) {
   const chats = useChatStore((s) => s.chats);
@@ -34,15 +35,21 @@ export function ChatLayout({ username }: { username?: string }) {
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
-    router.push('/login');
+    router.push('/login', { transitionTypes: ['nav-back'] });
     router.refresh();
   };
 
   const currentChat = getCurrentChat();
   const title = currentChat?.title || 'Bleep AI';
 
+  // Show a fidelity skeleton until the user's chats have been loaded from the
+  // server, then fade the real shell in over it.
+  if (!isHydrated) {
+    return <AppSkeleton />;
+  }
+
   return (
-    <div className="flex h-dvh bg-background overflow-hidden">
+    <div className="flex h-dvh bg-background overflow-hidden animate-app-in">
       {/* Desktop sidebar (always visible) */}
       <aside className="hidden lg:flex w-72 flex-shrink-0">
         <ChatSidebar username={username} onLogout={handleLogout} />

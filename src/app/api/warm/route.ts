@@ -12,6 +12,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const contextWindow = Number(process.env.OLLAMA_CONTEXT_WINDOW) || 4096;
     const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...ollamaAuthHeader() },
@@ -20,7 +21,7 @@ export async function GET(request: NextRequest) {
         prompt: '',
         stream: false,
         keep_alive: -1,
-        options: { num_predict: 1 },
+        options: { num_predict: 1, num_ctx: contextWindow, num_gpu: 24 },
       }),
     });
 

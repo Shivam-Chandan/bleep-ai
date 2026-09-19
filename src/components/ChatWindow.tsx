@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { useChatStore } from '@/lib/store';
 import { INTERRUPT_SUFFIX, type Message } from '@/lib/types';
 import { ApiError, extractCode, hintFor } from '@/lib/chatError';
+import { parseSseLine } from '@/lib/sse';
 import { MarkdownMessage } from './MarkdownMessage';
 
 interface ChatWindowProps {
@@ -42,7 +43,26 @@ function setResumeFlag(chatId: string | null) {
 }
 
 export function ChatWindow({ className = '' }: ChatWindowProps) {
-  const { currentChatId, getCurrentChat, addMessage, updateMessage, updateMessageSources, setLoading, setError, dismissError, error, errorCode, localStatus, models, modelsLoading, getModelForChat, setChatModel, streamingChats, chatStatus, setChatStreaming, setChatStatus } = useChatStore();
+  const currentChatId = useChatStore((s) => s.currentChatId);
+  const addMessage = useChatStore((s) => s.addMessage);
+  const updateMessage = useChatStore((s) => s.updateMessage);
+  const updateMessageSources = useChatStore((s) => s.updateMessageSources);
+  const setLoading = useChatStore((s) => s.setLoading);
+  const setError = useChatStore((s) => s.setError);
+  const dismissError = useChatStore((s) => s.dismissError);
+  const resolveChatId = useChatStore((s) => s.resolveChatId);
+  const error = useChatStore((s) => s.error);
+  const errorCode = useChatStore((s) => s.errorCode);
+  const localStatus = useChatStore((s) => s.localStatus);
+  const models = useChatStore((s) => s.models);
+  const modelsLoading = useChatStore((s) => s.modelsLoading);
+  const getModelForChat = useChatStore((s) => s.getModelForChat);
+  const setChatModel = useChatStore((s) => s.setChatModel);
+  const streamingChats = useChatStore((s) => s.streamingChats);
+  const chatStatus = useChatStore((s) => s.chatStatus);
+  const setChatStreaming = useChatStore((s) => s.setChatStreaming);
+  const setChatStatus = useChatStore((s) => s.setChatStatus);
+  const messagesLoading = useChatStore((s) => s.messagesLoading);
   const [inputValue, setInputValue] = useState('');
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [messageDurations, setMessageDurations] = useState<Record<string, number>>({});
@@ -67,6 +87,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
   // blocks sending in another.
   const isStreaming = currentChatId ? Boolean(streamingChats[currentChatId]) : false;
   const statusText = currentChatId ? chatStatus[currentChatId] ?? null : null;
+  // A chat with no messages yet may still be fetching its thread from the server.
+  const isMessagesLoading = currentChatId
+    ? Boolean(messagesLoading[currentChatId]) && messages.length === 0
+    : false;
 
   const selectedModelInfo = models.find((m) => m.id === selectedModel);
   const contextWindow = selectedModelInfo?.contextWindow ?? 8192;
@@ -132,8 +156,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
                 for (const line of lines) {
-                  if (!line.trim()) continue;
-                  let parsed: {
+                  const parsed = parseSseLine<{
                     type?: string;
                     active?: boolean;
                     content?: string;
@@ -141,12 +164,8 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                     message?: string;
                     messageId?: string;
                     code?: string;
-                  };
-                  try {
-                    parsed = JSON.parse(line);
-                  } catch {
-                    continue;
-                  }
+                  }>(line);
+                  if (!parsed) continue;
                   const targetId = parsed.messageId || answerId;
                   if (parsed.type === 'resume') {
                     if (parsed.active) {
@@ -251,20 +270,26 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     e.preventDefault();
     if (!inputValue.trim() || !currentChatId || isStreaming) return;
 
-    const chatId = currentChatId;
+    const rawChatId = currentChatId;
     const userMessage = inputValue.trim();
     setInputValue('');
-    setChatStreaming(chatId, true);
-    setChatStatus(chatId, null);
+    setChatStreaming(rawChatId, true);
+    setChatStatus(rawChatId, null);
     setLoading(true);
     setError(null);
-    setResumeFlag(chatId);
+    setResumeFlag(rawChatId);
 
-    addMessage(chatId, { role: 'user', content: userMessage });
+    addMessage(rawChatId, { role: 'user', content: userMessage });
+
+    // A brand-new chat is created optimistically; wait for its real server id
+    // before talking to the API. Existing chats resolve instantly.
+    const chatId = await resolveChatId(rawChatId);
+    setResumeFlag(chatId);
 
     // Build the request from history *before* adding the empty assistant
     // placeholder, so the server sees the user message as the last turn.
-    const chatHistory = getCurrentChat()?.messages || [];
+    const chatHistory =
+      useChatStore.getState().chats.find((c) => c.id === chatId)?.messages || [];
     const formattedMessages = chatHistory.map((msg) => ({
       role: msg.role,
       content: msg.content,
@@ -350,22 +375,15 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
             buffer = lines.pop() || '';
 
             for (const line of lines) {
-              if (!line.trim()) continue;
-
-              let parsed: {
+              const parsed = parseSseLine<{
                 type?: string;
                 content?: string;
                 text?: string;
                 message?: string;
                 code?: string;
                 sources?: { title: string; url: string }[];
-              };
-              try {
-                parsed = JSON.parse(line);
-              } catch (e) {
-                console.error('Parse error:', e);
-                continue;
-              }
+              }>(line);
+              if (!parsed) continue;
 
               if (parsed.type === 'status' && parsed.text) {
                 setChatStatus(chatId, parsed.text);
@@ -482,8 +500,11 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       }
     } finally {
       const durationMs = stopTimer();
+      // Non-reactive read of the freshest streamed content from the store.
+      const liveMessages = () =>
+        useChatStore.getState().chats.find((c) => c.id === chatId)?.messages ?? [];
       if (userStoppedRef.current) {
-        const current = getCurrentChat()?.messages.find((m) => m.id === answerId)?.content ?? fullContent;
+        const current = liveMessages().find((m) => m.id === answerId)?.content ?? fullContent;
         const content = current || fullContent;
         const final = content.includes(INTERRUPT_SUFFIX)
           ? content
@@ -493,7 +514,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
         updateMessage(chatId, answerId, final);
         userStoppedRef.current = false;
       }
-      const finalMessage = getCurrentChat()?.messages.find((m) => m.id === answerId);
+      const finalMessage = liveMessages().find((m) => m.id === answerId);
       if (finalMessage && finalMessage.content.trim()) {
         setMessageDurations((d) => ({ ...d, [answerId]: durationMs }));
       }
@@ -575,6 +596,16 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
+            </div>
+          )}
+          {isMessagesLoading && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-2 text-sm text-muted-foreground"
+            >
+              <span className="w-3 h-3 rounded-full border-2 border-muted-foreground/40 border-t-transparent animate-spin" />
+              Loading conversation…
             </div>
           )}
           {messages.map((message) => (

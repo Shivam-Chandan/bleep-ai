@@ -14,10 +14,9 @@ import { openRouterConfigured } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
 import {
   addAssistantChunk,
-  addMessage,
-  listMessages,
-  updateChatTitle,
-  userOwnsChat,
+  getOwnedChatMeta,
+  saveUserTurn,
+  type ChatMessageMeta,
 } from '@/lib/queries';
 import {
   beginGeneration,
@@ -32,6 +31,7 @@ import {
   type AgentMessage,
 } from '@/lib/agent';
 import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
+import { parseSseLine, SSE_CONTENT_TYPE } from '@/lib/sse';
 import {
   ModelError,
   isAbortError,
@@ -69,15 +69,15 @@ async function collectResponse(stream: ReadableStream<Uint8Array>): Promise<Coll
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === 'content') content += event.content ?? '';
-          if (event.type === 'sources' && Array.isArray(event.sources)) {
-            sources.push(...event.sources);
-          }
-        } catch {
-          // ignore malformed lines
+        const event = parseSseLine<{
+          type?: string;
+          content?: string;
+          sources?: { title: string; url: string }[];
+        }>(line);
+        if (!event) continue;
+        if (event.type === 'content') content += event.content ?? '';
+        if (event.type === 'sources' && Array.isArray(event.sources)) {
+          sources.push(...event.sources);
         }
       }
     }
@@ -106,31 +106,31 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
     }
 
-    // If a chatId is supplied, it must belong to the logged-in user.
-    if (chatId && !(await userOwnsChat(auth.userId, chatId))) {
-      return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
+    // Ownership check and message stats in a single query. A null result means
+    // the chat does not exist or is not owned by this user.
+    let meta: ChatMessageMeta | null = null;
+    if (chatId) {
+      meta = await getOwnedChatMeta(auth.userId, chatId);
+      if (!meta) {
+        return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
+      }
     }
 
     // Persist the latest user message before calling the model. Look for the
     // last user turn (the client may append an empty assistant placeholder),
     // and skip if it was already saved — the client retries on 502/503/504.
-    if (chatId) {
+    if (chatId && meta) {
       const lastUser = [...messages]
         .reverse()
         .find((m) => m.role === 'user' && m.content?.trim());
-      if (lastUser) {
-        const existing = await listMessages(chatId);
-        const lastSavedUser = [...existing]
-          .reverse()
-          .find((m) => m.role === 'user');
-        const alreadySaved = lastSavedUser?.content === lastUser.content;
-        if (!alreadySaved) {
-          await addMessage(chatId, 'user', lastUser.content);
-          // Title the chat from its first message if it has none yet.
-          if (existing.length === 0) {
-            await updateChatTitle(auth.userId, chatId, generateTitle(lastUser.content));
-          }
-        }
+      if (lastUser && meta.lastUserContent !== lastUser.content) {
+        // Message insert + recency (and title, on the first turn) in one batch.
+        await saveUserTurn(
+          chatId,
+          randomUUID(),
+          lastUser.content,
+          meta.count === 0 ? generateTitle(lastUser.content) : undefined
+        );
       }
     }
 
@@ -233,10 +233,12 @@ export async function POST(request: NextRequest) {
     if (stream) {
       return new NextResponse(prepared.stream, {
         headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Transfer-Encoding': 'chunked',
-          // Prevent intermediaries (Cloudflare tunnel, proxies) from buffering
-          // the stream, which would make tokens arrive late or stall.
+          // text/event-stream is not compressed by Vercel/CDNs. A compressible
+          // type (text/plain) gets gzipped, and gzip buffers the body — which
+          // is what made tokens arrive in one burst instead of streaming.
+          'Content-Type': SSE_CONTENT_TYPE,
+          // Do not set Transfer-Encoding: HTTP/2 (Vercel) forbids it and the
+          // platform chunks the stream itself.
           'Cache-Control': 'no-cache, no-transform',
           'X-Accel-Buffering': 'no',
         },
@@ -250,11 +252,29 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// Ollama's model list rarely changes, and the tunnel can be slow. Cache it
+// briefly so repeated page loads / mounts don't each pay the latency (and never
+// hang the picker when Ollama is unreachable).
+const MODELS_CACHE_TTL_MS = 60_000;
+const OLLAMA_TAGS_TIMEOUT_MS = 2_500;
+
+interface ModelsPayload {
+  defaultModel: string;
+  models: ChatModel[];
+  localStatus: 'ok' | 'unreachable';
+}
+
+let modelsCache: { data: ModelsPayload; expires: number } | null = null;
+
 export async function GET() {
   const auth = await requireSession();
   if (auth instanceof NextResponse) return auth;
 
   try {
+    if (modelsCache && modelsCache.expires > Date.now()) {
+      return NextResponse.json(modelsCache.data);
+    }
+
     // Expose the configured local models (OLLAMA_MODELS, or OLLAMA_MODEL), even
     // though Ollama may have several other models pulled on the same server.
     const localModels: ChatModel[] = [];
@@ -263,6 +283,7 @@ export async function GET() {
     try {
       const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
         headers: { ...ollamaAuthHeader() },
+        signal: AbortSignal.timeout(OLLAMA_TAGS_TIMEOUT_MS),
       });
       if (response.ok) {
         localStatus = 'ok';
@@ -300,7 +321,17 @@ export async function GET() {
       ...(openRouterConfigured() ? CLOUD_MODELS : []),
     ];
 
-    return NextResponse.json({ defaultModel: DEFAULT_MODEL, models, localStatus });
+    const payload: ModelsPayload = {
+      defaultModel: DEFAULT_MODEL,
+      models,
+      localStatus,
+    };
+    // Hold a healthy list longer; retry an unreachable Ollama quickly.
+    modelsCache = {
+      data: payload,
+      expires: Date.now() + (localStatus === 'ok' ? MODELS_CACHE_TTL_MS : 5_000),
+    };
+    return NextResponse.json(payload);
   } catch (error) {
     console.error('Models fetch error:', error);
     return NextResponse.json({ error: 'Failed to load models' }, { status: 500 });

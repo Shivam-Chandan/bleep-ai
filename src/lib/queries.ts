@@ -1,5 +1,5 @@
 import 'server-only';
-import { execute, select } from './db';
+import { batch, execute, select, type BatchStatement } from './db';
 import { randomUUID } from 'node:crypto';
 
 export interface UserRow {
@@ -134,17 +134,21 @@ export async function touchChat(chatId: string): Promise<void> {
   ]);
 }
 
+// Delete a chat owned by `userId`. Returns false when it does not exist (or is
+// not owned), so callers get the ownership check for free instead of issuing a
+// separate SELECT. Messages are removed explicitly first because remote libSQL
+// does not enforce the ON DELETE CASCADE foreign key by default.
 export async function deleteChat(
   userId: string,
   chatId: string
-): Promise<void> {
-  // Remove messages explicitly; remote libSQL does not enforce the
-  // ON DELETE CASCADE foreign key by default.
-  await execute(`DELETE FROM messages WHERE chat_id = ?`, [chatId]);
-  await execute(`DELETE FROM chats WHERE id = ? AND user_id = ?`, [
+): Promise<boolean> {
+  const info = await execute(`DELETE FROM chats WHERE id = ? AND user_id = ?`, [
     chatId,
     userId,
   ]);
+  if (info.rowsAffected === 0) return false;
+  await execute(`DELETE FROM messages WHERE chat_id = ?`, [chatId]);
+  return true;
 }
 
 // ---------- Messages ----------
@@ -154,6 +158,36 @@ export async function listMessages(chatId: string): Promise<MessageRow[]> {
     `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC`,
     [chatId]
   );
+}
+
+// Lightweight per-chat metadata used before persisting a new user turn: the
+// total message count (to decide titling) and the last user message content (to
+// make retries idempotent). Also doubles as the authorization check — returns
+// null when the chat does not exist or is not owned by `userId`. One query
+// replaces the previous ownership SELECT + message-stats SELECT pair.
+export interface ChatMessageMeta {
+  count: number;
+  lastUserContent: string | null;
+}
+
+export async function getOwnedChatMeta(
+  userId: string,
+  chatId: string
+): Promise<ChatMessageMeta | null> {
+  const rows = await select<{ n: number; last_user: string | null }>(
+    `SELECT (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) AS n,
+            (SELECT content FROM messages
+              WHERE chat_id = c.id AND role = 'user'
+              ORDER BY created_at DESC, rowid DESC LIMIT 1) AS last_user
+       FROM chats c
+      WHERE c.id = ? AND c.user_id = ?`,
+    [chatId, userId]
+  );
+  if (rows.length === 0) return null;
+  return {
+    count: rows[0]?.n ?? 0,
+    lastUserContent: rows[0]?.last_user ?? null,
+  };
 }
 
 export async function addMessage(
@@ -177,26 +211,55 @@ export async function addMessage(
   return msg;
 }
 
+// Persist a new user turn and bump the chat's recency in a single batch. When
+// `title` is given it also names the chat (first message). Previously this was a
+// message INSERT + touch UPDATE (+ title UPDATE), i.e. up to three sequential
+// remote round trips before the model was even called.
+export async function saveUserTurn(
+  chatId: string,
+  messageId: string,
+  content: string,
+  title?: string
+): Promise<void> {
+  const now = Date.now();
+  const statements: BatchStatement[] = [
+    {
+      sql: `INSERT INTO messages (id, chat_id, role, content, created_at)
+            VALUES (?, ?, 'user', ?, ?)`,
+      args: [messageId, chatId, content, now],
+    },
+    { sql: `UPDATE chats SET updated_at = ? WHERE id = ?`, args: [now, chatId] },
+  ];
+  if (title) {
+    statements.push({
+      sql: `UPDATE chats SET title = ? WHERE id = ?`,
+      args: [title, chatId],
+    });
+  }
+  await batch(statements);
+}
+
 // Upsert a streamed assistant chunk into the in-flight response identified by
-// `messageId` (the same id the client assigned its placeholder). Called for
-// every chunk during generation so the partial answer is persisted to the DB
-// and survives a client disconnect; idempotent across retries.
+// `messageId` (the same id the client assigned its placeholder). Called
+// periodically during generation so the partial answer is persisted and
+// survives a client disconnect. A single UPSERT replaces the previous
+// UPDATE-then-INSERT probe; the recency bump rides along in the same batch, so
+// each flush is one round trip instead of up to three.
 export async function addAssistantChunk(
   chatId: string,
   messageId: string,
   content: string
 ): Promise<void> {
-  const info = await execute(
-    `UPDATE messages SET content = ? WHERE id = ? AND chat_id = ?`,
-    [content, messageId, chatId]
-  );
-  if (info.rowsAffected > 0) return;
-  await execute(
-    `INSERT INTO messages (id, chat_id, role, content, created_at)
-     VALUES (?, ?, 'assistant', ?, ?)`,
-    [messageId, chatId, content, Date.now()]
-  );
-  await touchChat(chatId);
+  const now = Date.now();
+  await batch([
+    {
+      sql: `INSERT INTO messages (id, chat_id, role, content, created_at)
+            VALUES (?, ?, 'assistant', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET content = excluded.content`,
+      args: [messageId, chatId, content, now],
+    },
+    { sql: `UPDATE chats SET updated_at = ? WHERE id = ?`, args: [now, chatId] },
+  ]);
 }
 
 export async function getLastAssistantMessage(

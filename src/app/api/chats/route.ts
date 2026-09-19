@@ -1,31 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/auth';
-import { listChats, listMessages, createChat } from '@/lib/queries';
+import { listChats, createChat } from '@/lib/queries';
 import { randomUUID } from 'node:crypto';
 
-// GET /api/chats -> all chats (with messages) for the logged-in user
+// GET /api/chats -> chat headers only (id/title/timestamps) for the logged-in
+// user. Messages are intentionally omitted: fetching them here was an N+1 query
+// (one per chat) that returned every message ever sent and made loading the app
+// slower as history grew. The client lazy-loads a thread via GET /api/chats/:id.
 export async function GET() {
   const auth = await requireSession();
   if (auth instanceof NextResponse) return auth;
 
   const chatRows = await listChats(auth.userId);
-  const chats = await Promise.all(
-    chatRows.map(async (c) => {
-      const messages = await listMessages(c.id);
-      return {
-        id: c.id,
-        title: c.title,
-        createdAt: new Date(c.created_at).toISOString(),
-        updatedAt: new Date(c.updated_at).toISOString(),
-        messages: messages.map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          timestamp: new Date(m.created_at).toISOString(),
-        })),
-      };
-    })
-  );
+  const chats = chatRows.map((c) => ({
+    id: c.id,
+    title: c.title,
+    createdAt: new Date(c.created_at).toISOString(),
+    updatedAt: new Date(c.updated_at).toISOString(),
+  }));
 
   return NextResponse.json({ chats });
 }

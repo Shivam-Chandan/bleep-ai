@@ -9,9 +9,15 @@ export interface DbResult {
   rowsAffected: number;
 }
 
+export interface BatchStatement {
+  sql: string;
+  args?: SqlValue[];
+}
+
 interface Driver {
   select<T>(sql: string, args: SqlValue[]): Promise<T[]>;
   execute(sql: string, args: SqlValue[]): Promise<DbResult>;
+  batch(statements: Required<BatchStatement>[]): Promise<void>;
 }
 
 // Remote Turso/libSQL when configured (works on Vercel and locally);
@@ -141,6 +147,14 @@ async function createRemoteDriver(): Promise<Driver> {
         rowsAffected: result.rowsAffected,
       };
     },
+    // One network round trip for many statements instead of N. Critical for
+    // remote libSQL where each execute is a separate HTTP request.
+    async batch(statements: Required<BatchStatement>[]): Promise<void> {
+      await client.batch(
+        statements.map((s) => ({ sql: s.sql, args: s.args })),
+        'write'
+      );
+    },
   };
 }
 
@@ -161,6 +175,12 @@ async function createLocalDriver(): Promise<Driver> {
     async execute(sql: string, args: SqlValue[]): Promise<DbResult> {
       const info = sqlite.prepare(sql).run(...(args as never[]));
       return { rows: [], rowsAffected: info.changes };
+    },
+    async batch(statements: Required<BatchStatement>[]): Promise<void> {
+      const run = sqlite.transaction((stmts: Required<BatchStatement>[]) => {
+        for (const s of stmts) sqlite.prepare(s.sql).run(...(s.args as never[]));
+      });
+      run(statements);
     },
   };
 }
@@ -184,9 +204,8 @@ function ensureSchema(): Promise<void> {
   if (!global.__dbSchema__) {
     global.__dbSchema__ = (async () => {
       const driver = await getDriver();
-      for (const stmt of SCHEMA) {
-        await driver.execute(stmt, []);
-      }
+      // Single batch so the whole schema costs one round trip, not ~14.
+      await driver.batch(SCHEMA.map((sql) => ({ sql, args: [] })));
     })();
   }
   return global.__dbSchema__;
@@ -206,4 +225,11 @@ export async function execute(
 ): Promise<DbResult> {
   await ensureSchema();
   return (await getDriver()).execute(sql, args);
+}
+
+export async function batch(statements: BatchStatement[]): Promise<void> {
+  await ensureSchema();
+  return (await getDriver()).batch(
+    statements.map((s) => ({ sql: s.sql, args: s.args ?? [] }))
+  );
 }

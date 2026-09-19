@@ -12,7 +12,11 @@ interface ChatSidebarProps {
 }
 
 export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps) {
-  const { chats, currentChatId, createChat, deleteChat, setCurrentChat } = useChatStore();
+  const chats = useChatStore((s) => s.chats);
+  const currentChatId = useChatStore((s) => s.currentChatId);
+  const createChat = useChatStore((s) => s.createChat);
+  const deleteChat = useChatStore((s) => s.deleteChat);
+  const setCurrentChat = useChatStore((s) => s.setCurrentChat);
   const [hoveredChatId, setHoveredChatId] = useState<string | null>(null);
   const router = useRouter();
 

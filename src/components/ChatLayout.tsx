@@ -7,7 +7,12 @@ import { ChatWindow } from './ChatWindow';
 import { ChatSidebar } from './ChatSidebar';
 
 export function ChatLayout({ username }: { username?: string }) {
-  const { chats, isHydrated, loadChats, loadModels, createChat, getCurrentChat } = useChatStore();
+  const chats = useChatStore((s) => s.chats);
+  const isHydrated = useChatStore((s) => s.isHydrated);
+  const loadChats = useChatStore((s) => s.loadChats);
+  const loadModels = useChatStore((s) => s.loadModels);
+  const createChat = useChatStore((s) => s.createChat);
+  const getCurrentChat = useChatStore((s) => s.getCurrentChat);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const router = useRouter();
 

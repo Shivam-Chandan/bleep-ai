@@ -4,6 +4,7 @@ import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
 import { INTERRUPT_SUFFIX } from './types';
 import { ModelError, isAbortError, isModelError, modelFetch, type ModelErrorCode } from './modelErrors';
+import { sseEncode, SSE_HEARTBEAT } from './sse';
 
 // ---------- Types ----------
 
@@ -79,6 +80,12 @@ const MAX_MODEL_CALLS = 2;
 // Cap the pre-flight decision call. It runs before any bytes are streamed, so
 // a hung/cold model must not hold the HTTP response open indefinitely.
 const DECISION_TIMEOUT_MS = 30_000;
+
+// The decision call is non-streaming (it needs intact tool_calls), but it must
+// NOT be allowed to write the whole answer: if the model declines to search, we
+// re-generate the reply as a real stream so the user sees token-by-token output
+// instead of one block. Cap it to little more than a tool call needs.
+const DECISION_MAX_TOKENS = 256;
 
 // Tokens reserved for the system prompt, tool schema, and protocol framing.
 const SYSTEM_RESERVE_TOKENS = 512;
@@ -517,7 +524,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
   }
 
   let sources: SearchResult[] = [];
-  let mode: 'direct' | 'grounded' | 'content' | 'tool' | 'fallback' = 'direct';
+  let mode: 'direct' | 'grounded' | 'tool' | 'fallback' = 'direct';
   let decision: Decision = { content: '', toolCalls: [] };
   let streamable: Response | null = null;
 
@@ -579,7 +586,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             ],
             stream: false,
             contextWindow,
-            maxTokens: fitted.maxTokens,
+            maxTokens: DECISION_MAX_TOKENS,
             tools: [WEB_SEARCH_TOOL],
             options,
             signal: combineSignals(upstream.signal, DECISION_TIMEOUT_MS),
@@ -589,7 +596,20 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           const searchCall = decision.toolCalls.find((c) => c.name === 'web_search');
 
           if (!searchCall) {
-            mode = 'content';
+            // The model chose to answer directly. Re-issue it as a streamed call
+            // so the client renders tokens as they arrive; emit the non-streamed
+            // decision text would deliver the entire answer in a single block.
+            mode = 'direct';
+            streamable = await callModel({
+              isCloud,
+              model,
+              messages: [{ role: 'system', content: baseSystem(fitted) }, ...history],
+              stream: true,
+              contextWindow,
+              maxTokens: fitted.maxTokens,
+              options,
+              signal: upstream.signal,
+            });
             break;
           }
 
@@ -647,11 +667,18 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
   }
 
   const encoder = new TextEncoder();
-  const emitAs = (event: Record<string, unknown>) =>
-    encoder.encode(JSON.stringify(event) + '\n');
+  const emitAs = (event: Record<string, unknown>) => encoder.encode(sseEncode(event));
 
   const stream = new ReadableStream({
     async start(controller) {
+      // Flush an SSE comment before the (possibly slow) first model call so the
+      // client and every proxy see an open stream immediately rather than
+      // waiting for the first token.
+      try {
+        controller.enqueue(encoder.encode(SSE_HEARTBEAT));
+      } catch {
+        // consumer already gone; nothing to stream to
+      }
       // The consumer may disappear (user stop, closed tab, internet blip).
       // Once the first enqueue fails we stop pushing to the client, but we
       // deliberately KEEP generating: every chunk is persisted via
@@ -694,28 +721,21 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         }
       };
       try {
-        if (mode === 'content') {
-          const content = decision.content ?? '';
-          assistantContent = content;
-          if (content) emit({ type: 'content', content });
-          emit({ type: 'done' });
-        } else {
-          if (mode !== 'direct') {
-            emit({ type: 'status', text: 'Searching the web…' });
-            emit({
-              type: 'sources',
-              sources: sources.map((s) => ({ title: s.title, url: s.url })),
-            });
-          }
-          const result = await pipeModelStream(streamable!, isCloud, emit, upstream.signal);
-          assistantContent = result.content;
-          if (result.interrupted) {
-            emit({ type: 'interrupted' });
-            // Always record the stop, even if no token made it out yet.
-            assistantContent = assistantContent
-              ? assistantContent + INTERRUPT_SUFFIX
-              : INTERRUPT_SUFFIX.trim();
-          }
+        if (mode !== 'direct') {
+          emit({ type: 'status', text: 'Searching the web…' });
+          emit({
+            type: 'sources',
+            sources: sources.map((s) => ({ title: s.title, url: s.url })),
+          });
+        }
+        const result = await pipeModelStream(streamable!, isCloud, emit, upstream.signal);
+        assistantContent = result.content;
+        if (result.interrupted) {
+          emit({ type: 'interrupted' });
+          // Always record the stop, even if no token made it out yet.
+          assistantContent = assistantContent
+            ? assistantContent + INTERRUPT_SUFFIX
+            : INTERRUPT_SUFFIX.trim();
         }
         await persistChain;
         await opts.onAssistantContent(assistantContent);

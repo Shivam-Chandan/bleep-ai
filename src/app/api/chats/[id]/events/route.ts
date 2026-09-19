@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/auth';
 import { getLastAssistantMessage, userOwnsChat } from '@/lib/queries';
 import { isActive, subscribe, type GenerationEvent } from '@/lib/generation';
+import { sseEncode, SSE_CONTENT_TYPE, SSE_HEARTBEAT } from '@/lib/sse';
 
 // Allow the resume stream to stay open for long-running generations.
 export const maxDuration = 300;
@@ -9,7 +10,7 @@ export const maxDuration = 300;
 // GET /api/chats/:id/events
 // Resume stream for a chat whose generation may still be running server-side
 // (internet blip, reload, or a stall). Protocol is identical to /api/chat:
-// JSON-lines. On connect it first replays the persisted snapshot of the
+// Server-Sent Events. On connect it first replays the persisted snapshot of the
 // in-progress answer, then forwards live chunks until the generation finishes.
 // If the generation is not running, it replays whatever was saved and ends.
 export async function GET(
@@ -30,10 +31,15 @@ export async function GET(
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
+      try {
+        controller.enqueue(encoder.encode(SSE_HEARTBEAT));
+      } catch {
+        closed = true;
+      }
       const send = (event: GenerationEvent) => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+          controller.enqueue(encoder.encode(sseEncode(event)));
         } catch {
           closed = true;
         }
@@ -74,8 +80,9 @@ export async function GET(
 
   return new NextResponse(stream, {
     headers: {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Transfer-Encoding': 'chunked',
+      // text/event-stream is excluded from platform/CDN compression, which
+      // would otherwise buffer the stream and deliver tokens in one burst.
+      'Content-Type': SSE_CONTENT_TYPE,
       'Cache-Control': 'no-cache, no-transform',
       'X-Accel-Buffering': 'no',
     },

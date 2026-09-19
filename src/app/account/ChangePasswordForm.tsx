@@ -6,9 +6,10 @@ import { useRouter } from 'next/navigation';
 
 interface ChangePasswordFormProps {
   username: string;
+  embedded?: boolean;
 }
 
-export function ChangePasswordForm({ username }: ChangePasswordFormProps) {
+export function ChangePasswordForm({ username, embedded = false }: ChangePasswordFormProps) {
   const router = useRouter();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -58,6 +59,92 @@ export function ChangePasswordForm({ username }: ChangePasswordFormProps) {
     }
   };
 
+  const formBody = done ? (
+    <div className="rounded-2xl border bg-muted/50 p-6 text-center space-y-2">
+      <h2 className="font-semibold">Password updated</h2>
+      <p className="text-sm text-muted-foreground">
+        Please sign in again with your new password.
+      </p>
+      <p className="text-xs text-muted-foreground">Redirecting to sign-in…</p>
+    </div>
+  ) : (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="space-y-1">
+        <label htmlFor="currentPassword" className="text-sm font-medium">
+          Current password
+        </label>
+        <input
+          id="currentPassword"
+          name="currentPassword"
+          type="password"
+          autoComplete="current-password"
+          required
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          className="w-full h-11 px-3 rounded-xl border bg-background text-base focus:outline-none focus:ring-2 focus:ring-primary"
+        />
+      </div>
+
+      <div className="space-y-1">
+        <label htmlFor="newPassword" className="text-sm font-medium">
+          New password
+        </label>
+        <input
+          id="newPassword"
+          name="newPassword"
+          type="password"
+          autoComplete="new-password"
+          required
+          minLength={10}
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          className="w-full h-11 px-3 rounded-xl border bg-background text-base focus:outline-none focus:ring-2 focus:ring-primary"
+        />
+        <p className="text-xs text-muted-foreground">
+          At least 10 characters.
+        </p>
+      </div>
+
+      <div className="space-y-1">
+        <label htmlFor="confirmPassword" className="text-sm font-medium">
+          Confirm new password
+        </label>
+        <input
+          id="confirmPassword"
+          name="confirmPassword"
+          type="password"
+          autoComplete="new-password"
+          required
+          minLength={10}
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          className="w-full h-11 px-3 rounded-xl border bg-background text-base focus:outline-none focus:ring-2 focus:ring-primary"
+        />
+      </div>
+
+      {error && <p className="text-sm text-red-500">{error}</p>}
+
+      <button
+        type="submit"
+        disabled={loading}
+        className="w-full h-11 rounded-xl bg-primary text-primary-foreground font-medium hover:bg-primary/90 active:bg-primary/80 disabled:opacity-50 transition-colors"
+      >
+        {loading ? 'Please wait…' : 'Update password'}
+      </button>
+    </form>
+  );
+
+  // Embedded mode: just the heading + form, no page chrome (the account page
+  // provides the shell and renders other sections alongside this one).
+  if (embedded) {
+    return (
+      <div className="space-y-4">
+        <h2 className="text-lg font-semibold">Change password</h2>
+        {formBody}
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-dvh flex-col bg-background px-4">
       <div className="w-full max-w-sm mx-auto flex-1 flex flex-col justify-center my-8">
@@ -83,80 +170,7 @@ export function ChangePasswordForm({ username }: ChangePasswordFormProps) {
           </div>
         </div>
 
-        {done ? (
-          <div className="rounded-2xl border bg-muted/50 p-6 text-center space-y-2">
-            <h2 className="font-semibold">Password updated</h2>
-            <p className="text-sm text-muted-foreground">
-              Please sign in again with your new password.
-            </p>
-            <p className="text-xs text-muted-foreground">Redirecting to sign-in…</p>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1">
-              <label htmlFor="currentPassword" className="text-sm font-medium">
-                Current password
-              </label>
-              <input
-                id="currentPassword"
-                name="currentPassword"
-                type="password"
-                autoComplete="current-password"
-                required
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                className="w-full h-11 px-3 rounded-xl border bg-background text-base focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label htmlFor="newPassword" className="text-sm font-medium">
-                New password
-              </label>
-              <input
-                id="newPassword"
-                name="newPassword"
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={10}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full h-11 px-3 rounded-xl border bg-background text-base focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-              <p className="text-xs text-muted-foreground">
-                At least 10 characters.
-              </p>
-            </div>
-
-            <div className="space-y-1">
-              <label htmlFor="confirmPassword" className="text-sm font-medium">
-                Confirm new password
-              </label>
-              <input
-                id="confirmPassword"
-                name="confirmPassword"
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={10}
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full h-11 px-3 rounded-xl border bg-background text-base focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-            </div>
-
-            {error && <p className="text-sm text-red-500">{error}</p>}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full h-11 rounded-xl bg-primary text-primary-foreground font-medium hover:bg-primary/90 active:bg-primary/80 disabled:opacity-50 transition-colors"
-            >
-              {loading ? 'Please wait…' : 'Update password'}
-            </button>
-          </form>
-        )}
+        {formBody}
       </div>
     </div>
   );

@@ -7,8 +7,20 @@
   "functions": {
     "src/app/api/chat/route.ts": {
       "maxDuration": 300
+    },
+    "src/app/api/digest/summarize/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/digest/run/route.ts": {
+      "maxDuration": 300
     }
   },
+  "crons": [
+    {
+      "path": "/api/digest/summarize",
+      "schedule": "0 12 * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",

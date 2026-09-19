@@ -26,6 +26,11 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
     onNavigate?.();
   };
 
+  const handleOpenDigest = () => {
+    router.push('/digest');
+    onNavigate?.();
+  };
+
   const handleSelectChat = (id: string) => {
     setCurrentChat(id);
     onNavigate?.();
@@ -57,7 +62,7 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
         </div>
       </div>
 
-      <div className="p-4 border-b">
+      <div className="p-4 border-b space-y-2">
         <button
           onClick={handleNewChat}
           className="w-full flex items-center gap-3 px-3 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 active:bg-primary/80 transition-colors"
@@ -66,6 +71,16 @@ export function ChatSidebar({ onNavigate, username, onLogout }: ChatSidebarProps
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
           <span className="font-medium">New Chat</span>
+        </button>
+
+        <button
+          onClick={handleOpenDigest}
+          className="w-full flex items-center gap-3 px-3 py-2.5 border border-border text-foreground rounded-xl hover:bg-muted active:bg-muted transition-colors"
+        >
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          </svg>
+          <span className="font-medium">Daily Digest</span>
         </button>
       </div>
 

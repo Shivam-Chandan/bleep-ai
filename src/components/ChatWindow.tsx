@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { useChatStore } from '@/lib/store';
 import { INTERRUPT_SUFFIX, type Message } from '@/lib/types';
 import { ApiError, extractCode, hintFor } from '@/lib/chatError';
@@ -55,7 +55,12 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
   const startTimeRef = useRef<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const chat = getCurrentChat();
+  // Subscribe REACTIVELY to the current chat so a re-render fires on every
+  // token during streaming. (A non-reactive getCurrentChat() read here would
+  // mutate state without repainting, making the answer appear all at once.)
+  const chat = useChatStore((s) =>
+    s.chats.find((c) => c.id === s.currentChatId)
+  );
   const messages = useMemo(() => chat?.messages || [], [chat]);
   const selectedModel = currentChatId ? getModelForChat(currentChatId) : undefined;
   // Streaming is tracked per chat, so an in-flight answer in one chat never
@@ -711,7 +716,9 @@ function ContextMeter({ used, total }: { used: number; total: number }) {
   );
 }
 
-function MessageBubble({ message, isStreaming, durationMs }: { message: Message; isStreaming?: boolean; durationMs?: number }) {
+// Memoized so that during streaming only the message whose content changed
+// repaints — the rest of the conversation stays cached (cheap for long chats).
+const MessageBubble = memo(function MessageBubble({ message, isStreaming, durationMs }: { message: Message; isStreaming?: boolean; durationMs?: number }) {
   return (
     <div className={`flex gap-3 animate-message-in ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div
@@ -755,4 +762,4 @@ function MessageBubble({ message, isStreaming, durationMs }: { message: Message;
       </div>
     </div>
   );
-}
+});

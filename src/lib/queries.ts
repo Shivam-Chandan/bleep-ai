@@ -217,3 +217,206 @@ export async function userOwnsChat(
 ): Promise<boolean> {
   return (await getChat(userId, chatId)) !== undefined;
 }
+
+// ---------- Ingest tokens ----------
+
+export interface IngestTokenRow {
+  token_hash: string;
+  user_id: string;
+  label: string;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+export async function createIngestToken(
+  userId: string,
+  tokenHash: string,
+  label: string
+): Promise<void> {
+  await execute(
+    `INSERT INTO ingest_tokens (token_hash, user_id, label, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [tokenHash, userId, label, Date.now()]
+  );
+}
+
+export async function getUserIdByTokenHash(
+  tokenHash: string
+): Promise<string | undefined> {
+  const rows = await select<{ user_id: string }>(
+    `SELECT user_id FROM ingest_tokens WHERE token_hash = ?`,
+    [tokenHash]
+  );
+  return rows[0]?.user_id;
+}
+
+export async function touchIngestToken(tokenHash: string): Promise<void> {
+  await execute(`UPDATE ingest_tokens SET last_used_at = ? WHERE token_hash = ?`, [
+    Date.now(),
+    tokenHash,
+  ]);
+}
+
+export async function listIngestTokens(
+  userId: string
+): Promise<IngestTokenRow[]> {
+  return select<IngestTokenRow>(
+    `SELECT * FROM ingest_tokens WHERE user_id = ? ORDER BY created_at DESC`,
+    [userId]
+  );
+}
+
+export async function deleteIngestToken(
+  userId: string,
+  tokenHash: string
+): Promise<void> {
+  await execute(`DELETE FROM ingest_tokens WHERE token_hash = ? AND user_id = ?`, [
+    tokenHash,
+    userId,
+  ]);
+}
+
+// ---------- Digest items ----------
+
+export type DigestSource = 'gmail' | 'calendar' | 'slack' | 'zoom';
+
+export interface DigestItemInput {
+  source: DigestSource;
+  day: string; // YYYY-MM-DD
+  externalId?: string | null;
+  payload: unknown; // serialized to JSON
+}
+
+export interface DigestItemRow {
+  id: string;
+  user_id: string;
+  source: string;
+  day: string;
+  external_id: string | null;
+  payload: string;
+  created_at: number;
+}
+
+// Idempotent batch insert. Re-POSTing the same (user, source, externalId)
+// is a no-op so integrations can safely retry. Returns items actually stored.
+export async function addDigestItems(
+  userId: string,
+  items: DigestItemInput[]
+): Promise<number> {
+  let stored = 0;
+  for (const item of items) {
+    const info = await execute(
+      `INSERT INTO digest_items
+         (id, user_id, source, day, external_id, payload, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, source, external_id) DO NOTHING`,
+      [
+        randomUUID(),
+        userId,
+        item.source,
+        item.day,
+        item.externalId ?? null,
+        JSON.stringify(item.payload ?? null),
+        Date.now(),
+      ]
+    );
+    if (info.rowsAffected > 0) stored += 1;
+  }
+  return stored;
+}
+
+export async function listDigestItems(
+  userId: string,
+  day: string
+): Promise<DigestItemRow[]> {
+  return select<DigestItemRow>(
+    `SELECT * FROM digest_items WHERE user_id = ? AND day = ?
+     ORDER BY source ASC, created_at ASC`,
+    [userId, day]
+  );
+}
+
+// Distinct user ids that have any items for a given day (drives the cron loop).
+export async function listUsersWithItemsForDay(day: string): Promise<string[]> {
+  const rows = await select<{ user_id: string }>(
+    `SELECT DISTINCT user_id FROM digest_items WHERE day = ?`,
+    [day]
+  );
+  return rows.map((r) => r.user_id);
+}
+
+// ---------- Digest summaries ----------
+
+export interface DigestSummaryRow {
+  user_id: string;
+  day: string;
+  content: string;
+  created_at: number;
+}
+
+export async function upsertDigestSummary(
+  userId: string,
+  day: string,
+  content: string
+): Promise<void> {
+  const info = await execute(
+    `UPDATE digest_summaries SET content = ?, created_at = ?
+     WHERE user_id = ? AND day = ?`,
+    [content, Date.now(), userId, day]
+  );
+  if (info.rowsAffected > 0) return;
+  await execute(
+    `INSERT INTO digest_summaries (user_id, day, content, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [userId, day, content, Date.now()]
+  );
+}
+
+export async function getDigestSummary(
+  userId: string,
+  day: string
+): Promise<DigestSummaryRow | undefined> {
+  const rows = await select<DigestSummaryRow>(
+    `SELECT * FROM digest_summaries WHERE user_id = ? AND day = ?`,
+    [userId, day]
+  );
+  return rows[0];
+}
+
+export async function listRecentDigestSummaries(
+  userId: string,
+  limit = 14
+): Promise<DigestSummaryRow[]> {
+  return select<DigestSummaryRow>(
+    `SELECT * FROM digest_summaries WHERE user_id = ?
+     ORDER BY day DESC LIMIT ?`,
+    [userId, limit]
+  );
+}
+
+// Paginated feed for the infinite scroller. Returns the newest `limit` days
+// strictly older than `before` (a YYYY-MM-DD cursor). Omit `before` for the
+// first page. Fetches limit+1 to tell the client if more remain.
+export async function listDigestSummariesPage(
+  userId: string,
+  limit: number,
+  before?: string
+): Promise<{ days: DigestSummaryRow[]; nextCursor: string | null }> {
+  const fetchN = limit + 1;
+  const rows = before
+    ? await select<DigestSummaryRow>(
+        `SELECT * FROM digest_summaries WHERE user_id = ? AND day < ?
+         ORDER BY day DESC LIMIT ?`,
+        [userId, before, fetchN]
+      )
+    : await select<DigestSummaryRow>(
+        `SELECT * FROM digest_summaries WHERE user_id = ?
+         ORDER BY day DESC LIMIT ?`,
+        [userId, fetchN]
+      );
+
+  const hasMore = rows.length > limit;
+  const days = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? days[days.length - 1].day : null;
+  return { days, nextCursor };
+}

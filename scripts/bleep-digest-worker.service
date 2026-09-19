@@ -1,0 +1,19 @@
+[Unit]
+Description=Bleep AI digest worker (polls digest_runs, generates locally, writes back)
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to wherever the repo lives on this box.
+WorkingDirectory=/home/%u/bleep-ai-chat
+EnvironmentFile=/home/%u/bleep-ai-chat/.env.local
+ExecStart=/usr/bin/node scripts/digest-worker.mjs
+Restart=on-failure
+RestartSec=10
+# Long-running; a single generation can legitimately take minutes on this
+# box's GPU. Give systemd plenty of room before considering a stop stuck.
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

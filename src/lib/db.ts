@@ -92,6 +92,26 @@ const SCHEMA = [
      PRIMARY KEY (user_id, day),
      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
    )`,
+  // Work queue between the Next app (enqueues) and the box-side digest
+  // worker (scripts/digest-worker.mjs, claims + generates + writes the
+  // summary). Generation is deliberately NOT done inside a Vercel function —
+  // see scripts/digest-worker.mjs for why. One row per user/day; re-enqueuing
+  // a done/failed day resets it to pending (see queries.enqueueDigestRun).
+  `CREATE TABLE IF NOT EXISTS digest_runs (
+     id           TEXT PRIMARY KEY,
+     user_id      TEXT NOT NULL,
+     day          TEXT NOT NULL,
+     status       TEXT NOT NULL DEFAULT 'pending', -- pending | processing | done | failed
+     error        TEXT,
+     requested_at INTEGER NOT NULL,
+     started_at   INTEGER,
+     finished_at  INTEGER,
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_runs_dedupe
+     ON digest_runs(user_id, day)`,
+  `CREATE INDEX IF NOT EXISTS idx_digest_runs_status
+     ON digest_runs(status, requested_at)`,
   RATE_LIMIT_TABLE,
   RATE_LIMIT_INDEX,
   RATE_LIMIT_KEY_INDEX,

@@ -608,14 +608,18 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
               Loading conversation…
             </div>
           )}
-          {messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              message={message}
-              durationMs={messageDurations[message.id]}
-              isStreaming={isStreaming && message.id === messages[messages.length - 1]?.id}
-            />
-          ))}
+          {messages.map((message) => {
+            const isLast = message.id === messages[messages.length - 1]?.id;
+            return (
+              <MessageBubble
+                key={message.id}
+                message={message}
+                durationMs={messageDurations[message.id]}
+                isStreaming={isStreaming && isLast}
+                statusText={isStreaming && isLast ? statusText : null}
+              />
+            );
+          })}
         </div>
         <div ref={messagesEndRef} />
       </div>
@@ -747,9 +751,42 @@ function ContextMeter({ used, total }: { used: number; total: number }) {
   );
 }
 
+// Loading indicator shown inside the assistant bubble while the model is
+// busy (decision / web search / first token) but nothing has been streamed yet.
+function ThinkingIndicator({ statusText }: { statusText: string | null }) {
+  return (
+    <div role="status" aria-live="polite" className="flex items-center gap-2 text-muted-foreground">
+      <span className="flex items-center gap-1">
+        {[0, 150, 300].map((delay) => (
+          <span
+            key={delay}
+            className="w-1.5 h-1.5 rounded-full bg-current animate-bounce"
+            style={{ animationDelay: `${delay}ms` }}
+          />
+        ))}
+      </span>
+      <span className="text-sm">{statusText ?? 'Thinking…'}</span>
+    </div>
+  );
+}
+
 // Memoized so that during streaming only the message whose content changed
 // repaints — the rest of the conversation stays cached (cheap for long chats).
-const MessageBubble = memo(function MessageBubble({ message, isStreaming, durationMs }: { message: Message; isStreaming?: boolean; durationMs?: number }) {
+const MessageBubble = memo(function MessageBubble({
+  message,
+  isStreaming,
+  durationMs,
+  statusText,
+}: {
+  message: Message;
+  isStreaming?: boolean;
+  durationMs?: number;
+  statusText?: string | null;
+}) {
+  // Before the first token lands the answer doesn't exist yet; surface a
+  // loading state ("Searching the web…" when the prompt hit web search,
+  // otherwise "Thinking…") instead of an empty bubble.
+  const thinking = isStreaming && message.content.trim() === '';
   return (
     <div className={`flex gap-3 animate-message-in ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div
@@ -760,13 +797,22 @@ const MessageBubble = memo(function MessageBubble({ message, isStreaming, durati
         }`}
       >
         {message.role === 'assistant' ? (
-          <MarkdownMessage content={message.content} reveal={isStreaming} />
+          thinking ? (
+            <ThinkingIndicator statusText={statusText ?? null} />
+          ) : (
+            <MarkdownMessage content={message.content} reveal={isStreaming} />
+          )
         ) : (
           <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-relaxed">{message.content}</div>
         )}
         {message.sources && message.sources.length > 0 && (
           <div className="mt-3 pt-2 border-t border-current/20 space-y-1">
-            <p className="text-xs font-semibold opacity-70">Sources</p>
+            <p className="flex items-center gap-1.5 text-xs font-semibold opacity-70">
+              <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35m1.35-5.15a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+              </svg>
+              Web search · {message.sources.length} {message.sources.length === 1 ? 'source' : 'sources'}
+            </p>
             {message.sources.map((source, index) => (
               <a
                 key={`${source.url}-${index}`}
@@ -786,7 +832,7 @@ const MessageBubble = memo(function MessageBubble({ message, isStreaming, durati
               took {formatDuration(durationMs)}
             </span>
           )}
-          {isStreaming && (
+          {isStreaming && !thinking && (
             <span className="inline-block w-2 h-2 bg-current opacity-50 animate-pulse" />
           )}
         </div>

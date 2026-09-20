@@ -7,6 +7,10 @@ export const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:3b';
 // threads keeps the rest of the system responsive. Tune via OLLAMA_NUM_THREAD.
 export const OLLAMA_NUM_THREAD = Number(process.env.OLLAMA_NUM_THREAD) || 2;
 
+// Max GPU layers to offload. Hard ceiling for a 7B Q4 on this 2GB GPU is 6
+// (higher OOMs at the digest's 8192 context) — see docs/BENCHMARKING.md.
+export const OLLAMA_NUM_GPU = Number(process.env.OLLAMA_NUM_GPU) || 6;
+
 const OLLAMA_AUTH_TOKEN = process.env.OLLAMA_AUTH_TOKEN;
 
 export function ollamaAuthHeader(): Record<string, string> {

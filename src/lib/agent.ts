@@ -1,5 +1,5 @@
 import 'server-only';
-import { OLLAMA_BASE_URL, OLLAMA_NUM_THREAD, ollamaAuthHeader } from './ollama';
+import { OLLAMA_BASE_URL, OLLAMA_NUM_GPU, OLLAMA_NUM_THREAD, ollamaAuthHeader } from './ollama';
 import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
 import { INTERRUPT_SUFFIX } from './types';
@@ -293,11 +293,11 @@ async function callModel(params: ModelCallParams): Promise<Response> {
         top_p: 0.9,
         repeat_penalty: 1.1,
         num_ctx: params.contextWindow,
-        // Fill GPU VRAM first, spill remaining layers to CPU RAM. Auto (-1) is
-        // overly conservative on this 2GB 840M and only placed 5/36 layers
-        // (~1GB of VRAM left idle). Measured on this box: 24 layers fills
-        // ~1887MiB (70% GPU) and loads stably; 28+ fails with CUDA OOM.
-        num_gpu: 24,
+        // Max GPU layers that fit on this 2GB 840M for the resident 7B model
+        // is 6 (28 layers; 8+ OOMs at the 8192 ctx the digest/chat use). This
+        // box can only hold one size class resident at a time — see
+        // docs/BENCHMARKING.md. Override via OLLAMA_NUM_GPU.
+        num_gpu: OLLAMA_NUM_GPU,
         // Physical cores, not logical (see src/lib/ollama.ts) — keeps the
         // 2C/4T box responsive during long generations.
         num_thread: OLLAMA_NUM_THREAD,

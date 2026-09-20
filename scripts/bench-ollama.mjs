@@ -22,6 +22,7 @@ import process from 'node:process';
 const BASE = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
 const MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:3b';
 const NUM_GPU = Number(process.env.OLLAMA_NUM_GPU || 24);
+const NUM_THREAD = Number(process.env.OLLAMA_NUM_THREAD || 2);
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RESULTS_FILE =
@@ -76,7 +77,7 @@ async function generate({
     prompt,
     stream: false,
     keep_alive: -1,
-    options: { num_predict, num_ctx, num_gpu: NUM_GPU, temperature: 0.7 },
+    options: { num_predict, num_ctx, num_gpu: NUM_GPU, num_thread: NUM_THREAD, temperature: 0.7 },
   });
   const loadNs = res.load_duration ?? 0;
   const ttftNs = res.prompt_eval_duration ?? 0;

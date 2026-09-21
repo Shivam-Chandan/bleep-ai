@@ -20,12 +20,12 @@ interface Driver {
   batch(statements: Required<BatchStatement>[]): Promise<void>;
 }
 
-// Remote Turso/libSQL when configured (works on Vercel and locally);
+// Remote sqld/libSQL when configured (works on Vercel and locally);
 // otherwise a local SQLite file via better-sqlite3 (dev fallback).
 const REMOTE_URL =
-  process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
+  process.env.DATABASE_URL || process.env.LIBSQL_URL || '';
 const REMOTE_TOKEN =
-  process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
+  process.env.DATABASE_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
 
 export const usingRemote = Boolean(REMOTE_URL);
 

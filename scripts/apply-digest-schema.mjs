@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * Applies the digest-related tables/indexes to the remote Turso DB, idempotently
- * (CREATE ... IF NOT EXISTS). Mirrors the digest portion of SCHEMA in
- * src/lib/db.ts so production has the tables before any traffic.
+ * Applies the digest-related tables/indexes to the remote sqld/libSQL DB,
+ * idempotently (CREATE ... IF NOT EXISTS). Mirrors the digest portion of SCHEMA
+ * in src/lib/db.ts so production has the tables before any traffic.
  *
  * Usage:
- *   node --env-file=/tmp/bleep-prod2.env scripts/apply-digest-schema.mjs
- * (needs TURSO_DATABASE_URL + TURSO_AUTH_TOKEN in the env)
+ *   node --env-file=.env.local scripts/apply-digest-schema.mjs
+ * (needs DATABASE_URL + DATABASE_AUTH_TOKEN in the env)
  */
 import { createClient } from '@libsql/client/web';
 
-const URL = process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
-const TOKEN = process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
+const URL = process.env.DATABASE_URL || process.env.LIBSQL_URL || '';
+const TOKEN = process.env.DATABASE_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
 if (!URL) {
-  console.error('TURSO_DATABASE_URL is required');
+  console.error('DATABASE_URL is required');
   process.exit(1);
 }
 
@@ -63,4 +63,4 @@ for (const sql of STATEMENTS) {
   console.log('ok:', sql.trim().split('\n')[0]);
 }
 client.close();
-console.log('\nDigest schema applied to Turso.');
+console.log('\nDigest schema applied to the DB.');

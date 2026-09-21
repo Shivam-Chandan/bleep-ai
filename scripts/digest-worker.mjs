@@ -7,7 +7,7 @@
  * (POST /api/ingest -> POST /api/digest/run enqueues a row and returns
  * instantly), generates the briefing locally against http://localhost:11434
  * with no tunnel and no wall-clock deadline, and writes the result straight
- * to the same database the Next app reads from (Turso, so /digest updates
+ * to the same database the Next app reads from (local sqld, so /digest updates
  * with no redeploy).
  *
  * WHY THIS EXISTS: a realistic day's briefing on qwen2.5:3b on this box's
@@ -18,8 +18,8 @@
  * inside the Vercel function removes the deadline entirely: output quality
  * and length are never traded for latency.
  *
- * DB: mirrors src/lib/db.ts's driver choice (remote Turso when
- * TURSO_DATABASE_URL/LIBSQL_URL is set, else a local SQLite file at DB_PATH)
+ * DB: mirrors src/lib/db.ts's driver choice (remote sqld/libSQL when
+ * DATABASE_URL/LIBSQL_URL is set, else a local SQLite file at DB_PATH)
  * so this script and the Next app always agree on the same schema/data
  * without importing Next/TypeScript machinery — see src/lib/digestCore.mjs
  * for why the prompt-building logic itself is a shared plain-JS module
@@ -30,7 +30,7 @@
  *   # or as a systemd service — see scripts/bleep-digest-worker.service
  *
  * Env:
- *   TURSO_DATABASE_URL / TURSO_AUTH_TOKEN   (or LIBSQL_URL / LIBSQL_AUTH_TOKEN)
+ *   DATABASE_URL / DATABASE_AUTH_TOKEN   (or LIBSQL_URL / LIBSQL_AUTH_TOKEN)
  *   DB_PATH                                 local SQLite fallback (default ./data/app.db)
  *   OLLAMA_LOCAL_URL                        default http://127.0.0.1:11434 (bypasses
  *                                            the public tunnel/auth proxy entirely —
@@ -57,8 +57,8 @@ import {
 } from '../src/lib/digestCore.mjs';
 import { encrypt, decrypt } from '../src/lib/crypto.mjs';
 
-const REMOTE_URL = process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
-const REMOTE_TOKEN = process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
+const REMOTE_URL = process.env.DATABASE_URL || process.env.LIBSQL_URL || '';
+const REMOTE_TOKEN = process.env.DATABASE_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db');
 
 const OLLAMA_URL = process.env.OLLAMA_LOCAL_URL || 'http://127.0.0.1:11434';
@@ -78,7 +78,7 @@ async function createDriver() {
     const { createClient } = await import('@libsql/client');
     const url = REMOTE_URL.replace(/^libsql:\/\//, 'https://').replace(/^wss:\/\//, 'https://');
     const client = createClient({ url, authToken: REMOTE_TOKEN || undefined, intMode: 'number' });
-    log('DB: remote Turso/libSQL at', url);
+    log('DB: remote sqld/libSQL at', url);
     return {
       async select(sql, args = []) {
         const r = await client.execute({ sql, args });

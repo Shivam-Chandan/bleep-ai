@@ -59,6 +59,32 @@ SQLite. No third-party auth service is used.
 
 ## 2. Data model (SQLite)
 
+### 2a. Local-first DB topology
+
+The database is **fully local** — the Turso cloud DB has been migrated onto this
+box and is served by `sqld` (the libSQL server binary), which speaks the Turso
+HTTP protocol from the exact same `@libsql/client` the app already used.
+
+- **sqld** runs as `bleep-sqld.service`, data at `/var/lib/bleep-sqld/data.sqld`,
+  and listens **only** on the Tailscale IP `100.90.40.69:8080` (enforced with
+  `--bind-addr`), with JWT auth (2048-bit Ed25519 keypair minted per-deploy).
+- **Box-side services** (the digest worker `bleep-digest-worker.service`) use the
+  direct tailnet URL `DATABASE_URL=http://100.90.40.69:8080`.
+- **Vercel** (stateless, no local disk) reaches the same DB through Tailscale
+  Funnel at `DATABASE_URL=https://bleep-ai.tailc327c1.ts.net/sql/`
+  (**trailing slash required** — the libsql client resolves `/v2/pipeline`
+  relative to it). `tailscale serve/funnel` strips the `/sql` prefix, so sqld
+  sees its real `/v2/pipeline` path.
+- `DATABASE_AUTH_TOKEN` is the sqld JWT (same value everywhere).
+
+The old cloud env is backed up at `/tmp/opencode/env.local.turso-backup`.
+
+Migration tool (idempotent): `node scripts/migrate-turso-to-sqld.mjs`
+(source = old Turso `SOURCE_DATABASE_URL`/`SOURCE_DATABASE_TOKEN`, dest = `LOCAL_DB_URL`
++ `LOCAL_DB_TOKEN`, default `http://100.90.40.69:8080`).
+
+### 2b. Data model
+
 A single file at `./data/app.db` (override with `DB_PATH`). Created automatically on
 first run. WAL mode enabled.
 
@@ -160,7 +186,7 @@ pm2 save
 ### First login
 1. Open `http://localhost:3000` → you'll be redirected to `/login`.
 2. Click **Sign up**, create the first account (username ≥ 3 chars, password ≥ 10 chars).
-3. You're dropped into the chat UI. Chats now persist per-user (Turso/libSQL when configured, else local SQLite).
+3. You're dropped into the chat UI. Chats now persist per-user (local sqld DB, see §2a).
 4. Signups are already locked at the app level (`REGISTRATION_OPEN=false` in env).
    Re-enable temporarily only when you need a new account, then flip it back and restart.
 

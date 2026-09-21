@@ -8,7 +8,7 @@
  *   node --env-file=.env.local scripts/create-user.mjs <username> [password]
  *
  * Password defaults to the username when omitted. Reads the same config as
- * src/lib/db.ts: remote Turso when TURSO_DATABASE_URL is set, otherwise the
+ * src/lib/db.ts: remote sqld/libSQL when DATABASE_URL is set, otherwise the
  * local SQLite file at DB_PATH (default ./data/app.db).
  */
 import { createClient } from '@libsql/client/web';
@@ -17,9 +17,9 @@ import crypto from 'node:crypto';
 import { sealUsername } from '../src/lib/crypto.mjs';
 
 const REMOTE_URL =
-  process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
+  process.env.DATABASE_URL || process.env.LIBSQL_URL || '';
 const REMOTE_TOKEN =
-  process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
+  process.env.DATABASE_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
 const DB_PATH = process.env.DB_PATH || './data/app.db';
 
 const username = process.argv[2];

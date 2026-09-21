@@ -21,7 +21,7 @@
  *   node --env-file=.env.local scripts/encrypt-existing-data.mjs [--dry-run]
  *
  * Env (same as src/lib/db.ts):
- *   TURSO_DATABASE_URL / TURSO_AUTH_TOKEN   (or LIBSQL_URL / LIBSQL_AUTH_TOKEN)
+ *   DATABASE_URL / DATABASE_AUTH_TOKEN     (or LIBSQL_URL / LIBSQL_AUTH_TOKEN)
  *   DB_PATH                                 local SQLite fallback (default ./data/app.db)
  *   ENCRYPTION_KEY                          ../../(or SESSION_SECRET fallback)
  */
@@ -34,9 +34,9 @@ import {
   sealUsername,
 } from '../src/lib/crypto.mjs';
 
-const REMOTE_URL = process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
+const REMOTE_URL = process.env.DATABASE_URL || process.env.LIBSQL_URL || '';
 const REMOTE_TOKEN =
-  process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
+  process.env.DATABASE_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db');
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -81,7 +81,7 @@ async function createDriver() {
       authToken: REMOTE_TOKEN || undefined,
       intMode: 'number',
     });
-    log('DB: remote Turso/libSQL at', url);
+    log('DB: remote sqld/libSQL at', url);
     return {
       async select(sql, args = []) {
         const r = await client.execute({ sql, args });

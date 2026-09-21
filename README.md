@@ -1,6 +1,6 @@
 # Bleep AI - Local LLM Chat Application
 
-A Next.js chat application that connects to a locally running Llama model via Ollama, deployable to Vercel.
+A Next.js chat application that connects to a locally running Llama model via Ollama, deployable to Vercel. Fully local-first: the database is a local SQLite served by `sqld` on this box over the tailnet.
 
 ## Architecture
 
@@ -9,6 +9,11 @@ A Next.js chat application that connects to a locally running Llama model via Ol
 │   Vercel    │ ─────────────► │ Tailscale Funnel      │ ─────────────► │  Ollama │
 │  (Frontend) │                │  (ts.net, permanent)  │                │ (Local) │
 └─────────────┘                └───────────────────────┘                └─────────┘
+                 \                    │
+                  \        ┌─────────┴──────────┐
+                   \       │  Funnel /sql ─────►│
+                    \      │  sqld (libSQL DB)  │  local SQLite
+                     └────►└────────────────────┘  (/var/lib/bleep-sqld)
 ```
 
 ## Prerequisites
@@ -63,18 +68,23 @@ and has no 100s request cap, so long model loads and streaming replies work
 without the watchdog/URL-sync dance:
 
 ```bash
-sudo tailscale funnel --bg 11435
+sudo tailscale funnel --bg --yes --https=443 --set-path=/ http://127.0.0.1:11435
+sudo tailscale funnel --bg --yes --https=443 --set-path=/sql http://100.90.40.69:8080
 ```
 
-This prints the permanent URL, e.g.:
+This publishes both routes on the permanent URL:
 
 ```
-https://bleep-ai.tailc327c1.ts.net   →   proxy http://127.0.0.1:11435
+https://bleep-ai.tailc327c1.ts.net        →  proxy http://127.0.0.1:11435
+https://bleep-ai.tailc327c1.ts.net/sql/   →  proxy http://100.90.40.69:8080
 ```
 
-The URL stays active across reboots (config is stored in Tailscale's state DB
+The URLs stay active across reboots (config is stored in Tailscale's state DB
 and re-applied by `bleep-funnel.service` on boot). Bearer-token auth still gates
-every request — a no-token curl gets `401`.
+every Ollama request — a no-token curl gets `401` — and sqld requires its JWT.
+The `/sql` route is the local sqld/libSQL DB for the Vercel app
+(`DATABASE_URL=https://bleep-ai.tailc327c1.ts.net/sql/`, trailing slash
+required) and for anything else that can't reach the tailnet IP directly.
 
 #### Watchdog: self-healing the Funnel
 
@@ -94,6 +104,8 @@ In your Vercel project settings, add (one time — the URL never changes):
 ```
 OLLAMA_BASE_URL=https://bleep-ai.tailc327c1.ts.net
 OLLAMA_MODEL=qwen2.5:3b
+DATABASE_URL=https://bleep-ai.tailc327c1.ts.net/sql/
+DATABASE_AUTH_TOKEN=<sqld JWT>
 ```
 
 ### 4. Deploy to Vercel

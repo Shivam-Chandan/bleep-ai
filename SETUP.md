@@ -46,7 +46,7 @@ SQLite. No third-party auth service is used.
 | `src/components/ChatLayout.tsx` | Loads chats on mount, shows logout. |
 | `src/components/ChatSidebar.tsx` | Shows current user + sign-out button. |
 | `src/components/ChatWindow.tsx` | Sends `chatId` so messages persist to the right chat. |
-| `.env.example` | Documents `SESSION_SECRET`, `DB_PATH`, `REGISTRATION_OPEN`. |
+| `.env.example` | Documents `SESSION_SECRET`, `ENCRYPTION_KEY`, `DB_PATH`, `REGISTRATION_OPEN`. |
 | `.gitignore` | Ignores `/data/` and `*.db*` (the SQLite files are per-machine). |
 
 ### New dependencies
@@ -108,6 +108,13 @@ OLLAMA_MODEL=qwen2.5:3b
 # REQUIRED: generate a stable secret. Do NOT change it later (it logs everyone out).
 SESSION_SECRET=<run: openssl rand -base64 32>
 
+# REQUIRED in production: encrypts all sensitive data at rest (chats, messages,
+# digest payloads, summaries, usernames, rate-limit keys) with AES-256-GCM.
+# Must be IDENTICAL on Vercel and on this box (the digest worker). Never change
+# it once data exists, or that data becomes unreadable. When unset, a key is
+# derived from SESSION_SECRET (dev fallback).
+ENCRYPTION_KEY=<run: openssl rand -base64 32>
+
 # Optional: relocate the SQLite file (defaults to ./data/app.db)
 # DB_PATH=/absolute/path/to/app.db
 
@@ -124,7 +131,16 @@ HEALTH_CHECK_SECRET=<run: openssl rand -base64 24>
 Generate the secrets:
 ```bash
 openssl rand -base64 32   # SESSION_SECRET
+openssl rand -base64 32   # ENCRYPTION_KEY
 openssl rand -base64 24   # HEALTH_CHECK_SECRET
+```
+
+If the database already contains plaintext rows (e.g. an existing Turso DB),
+seal them once with the same `ENCRYPTION_KEY` (back up first):
+
+```bash
+node --env-file=.env.local scripts/encrypt-existing-data.mjs --dry-run
+node --env-file=.env.local scripts/encrypt-existing-data.mjs
 ```
 
 ### Run (production)

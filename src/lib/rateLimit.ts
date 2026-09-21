@@ -1,5 +1,13 @@
 import 'server-only';
 import { execute, select } from './db';
+import { encryptDeterministic } from './crypto.mjs';
+
+// Rate-limit keys embed usernames and IPs, so they are stored as deterministic
+// ciphertext: equality still works for counting/clearing, but a database dump
+// does not reveal who was rate-limited or from where.
+function sealKey(key: string): string {
+  return encryptDeterministic(key) as string;
+}
 
 // Simple sliding-window attempt limiter backed by the same SQLite/Turso
 // database, so it works on the serverless (Vercel) runtime too.
@@ -22,7 +30,7 @@ interface AttemptRow {
 export async function countAttempts(key: string): Promise<number> {
   const rows = await select<AttemptRow>(
     `SELECT COUNT(*) AS n FROM limit_attempts WHERE key_ = ?`,
-    [key]
+    [sealKey(key)]
   );
   return rows[0]?.n ?? 0;
 }
@@ -56,12 +64,12 @@ export async function checkRateLimit(
 // Record a rate-limited event for `key`; expires naturally with the window.
 export async function recordAttempt(key: string): Promise<void> {
   await execute(`INSERT INTO limit_attempts (key_, ts) VALUES (?, ?)`, [
-    key,
+    sealKey(key),
     Date.now(),
   ]);
 }
 
 // Clear all recorded events for `key` (e.g. after a successful login).
 export async function clearAttempts(key: string): Promise<void> {
-  await execute(`DELETE FROM limit_attempts WHERE key_ = ?`, [key]);
+  await execute(`DELETE FROM limit_attempts WHERE key_ = ?`, [sealKey(key)]);
 }

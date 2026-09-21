@@ -1,6 +1,14 @@
 import 'server-only';
 import { batch, execute, select, type BatchStatement } from './db';
 import { randomUUID } from 'node:crypto';
+import {
+  decrypt,
+  encrypt,
+  encryptDeterministic,
+  isEncrypted,
+  normalizeUsername,
+  sealUsername,
+} from './crypto.mjs';
 
 export interface UserRow {
   id: string;
@@ -27,20 +35,26 @@ export interface MessageRow {
 
 // ---------- Users ----------
 
+// Returned rows always carry the plaintext (normalized) username even though the
+// column itself stores a deterministic ciphertext for case-insensitive lookup.
+function userFromRow(row: UserRow): UserRow {
+  return { ...row, username: normalizeUsername(String(decrypt(row.username) ?? '')) };
+}
+
 export async function createUser(
   username: string,
   passwordHash: string
 ): Promise<UserRow> {
   const user: UserRow = {
     id: randomUUID(),
-    username,
+    username: normalizeUsername(username),
     password_hash: passwordHash,
     created_at: Date.now(),
   };
   await execute(
     `INSERT INTO users (id, username, password_hash, created_at)
      VALUES (?, ?, ?, ?)`,
-    [user.id, user.username, user.password_hash, user.created_at]
+    [user.id, sealUsername(username), user.password_hash, user.created_at]
   );
   return user;
 }
@@ -48,16 +62,33 @@ export async function createUser(
 export async function getUserByUsername(
   username: string
 ): Promise<UserRow | undefined> {
-  const rows = await select<UserRow>(
-    `SELECT * FROM users WHERE username = ? COLLATE NOCASE`,
-    [username]
-  );
-  return rows[0];
+  const sealed = sealUsername(username);
+  let rows = await select<UserRow>(`SELECT * FROM users WHERE username = ?`, [
+    sealed,
+  ]);
+  if (rows.length === 0) {
+    // Row written before encryption was introduced: fall back to the plaintext
+    // column and transparently migrate it to the sealed form.
+    rows = await select<UserRow>(
+      `SELECT * FROM users WHERE username = ? COLLATE NOCASE`,
+      [String(username || '').trim()]
+    );
+    const legacy = rows[0];
+    if (legacy && !isEncrypted(legacy.username)) {
+      await execute(`UPDATE users SET username = ? WHERE id = ?`, [
+        sealed,
+        legacy.id,
+      ]);
+    }
+  }
+  const row = rows[0];
+  return row ? userFromRow(row) : undefined;
 }
 
 export async function getUserById(id: string): Promise<UserRow | undefined> {
   const rows = await select<UserRow>(`SELECT * FROM users WHERE id = ?`, [id]);
-  return rows[0];
+  const row = rows[0];
+  return row ? userFromRow(row) : undefined;
 }
 
 export async function updateUserPassword(
@@ -78,10 +109,11 @@ export async function countUsers(): Promise<number> {
 // ---------- Chats ----------
 
 export async function listChats(userId: string): Promise<ChatRow[]> {
-  return select<ChatRow>(
+  const rows = await select<ChatRow>(
     `SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC`,
     [userId]
   );
+  return rows.map((r) => ({ ...r, title: String(decrypt(r.title) ?? '') }));
 }
 
 export async function getChat(
@@ -92,7 +124,8 @@ export async function getChat(
     `SELECT * FROM chats WHERE id = ? AND user_id = ?`,
     [chatId, userId]
   );
-  return rows[0];
+  const row = rows[0];
+  return row ? { ...row, title: String(decrypt(row.title) ?? '') } : undefined;
 }
 
 export async function createChat(
@@ -111,7 +144,7 @@ export async function createChat(
   await execute(
     `INSERT INTO chats (id, user_id, title, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?)`,
-    [chat.id, chat.user_id, chat.title, chat.created_at, chat.updated_at]
+    [chat.id, chat.user_id, encrypt(chat.title), chat.created_at, chat.updated_at]
   );
   return chat;
 }
@@ -123,7 +156,7 @@ export async function updateChatTitle(
 ): Promise<void> {
   await execute(
     `UPDATE chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
-    [title, Date.now(), chatId, userId]
+    [encrypt(title), Date.now(), chatId, userId]
   );
 }
 
@@ -154,10 +187,11 @@ export async function deleteChat(
 // ---------- Messages ----------
 
 export async function listMessages(chatId: string): Promise<MessageRow[]> {
-  return select<MessageRow>(
+  const rows = await select<MessageRow>(
     `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC`,
     [chatId]
   );
+  return rows.map((r) => ({ ...r, content: String(decrypt(r.content) ?? '') }));
 }
 
 // Lightweight per-chat metadata used before persisting a new user turn: the
@@ -184,9 +218,13 @@ export async function getOwnedChatMeta(
     [chatId, userId]
   );
   if (rows.length === 0) return null;
+  const lastUser = rows[0]?.last_user;
   return {
     count: rows[0]?.n ?? 0,
-    lastUserContent: rows[0]?.last_user ?? null,
+    lastUserContent:
+      lastUser === null || lastUser === undefined
+        ? null
+        : String(decrypt(lastUser)),
   };
 }
 
@@ -205,7 +243,7 @@ export async function addMessage(
   await execute(
     `INSERT INTO messages (id, chat_id, role, content, created_at)
      VALUES (?, ?, ?, ?, ?)`,
-    [msg.id, msg.chat_id, msg.role, msg.content, msg.created_at]
+    [msg.id, msg.chat_id, msg.role, encrypt(msg.content), msg.created_at]
   );
   await touchChat(chatId);
   return msg;
@@ -226,7 +264,7 @@ export async function saveUserTurn(
     {
       sql: `INSERT INTO messages (id, chat_id, role, content, created_at)
             VALUES (?, ?, 'user', ?, ?)`,
-      args: [messageId, chatId, content, now],
+      args: [messageId, chatId, encrypt(content), now],
     },
     { sql: `UPDATE chats SET updated_at = ? WHERE id = ?`, args: [now, chatId] },
   ];
@@ -256,7 +294,7 @@ export async function addAssistantChunk(
       sql: `INSERT INTO messages (id, chat_id, role, content, created_at)
             VALUES (?, ?, 'assistant', ?, ?)
             ON CONFLICT(id) DO UPDATE SET content = excluded.content`,
-      args: [messageId, chatId, content, now],
+      args: [messageId, chatId, encrypt(content), now],
     },
     { sql: `UPDATE chats SET updated_at = ? WHERE id = ?`, args: [now, chatId] },
   ]);
@@ -270,7 +308,8 @@ export async function getLastAssistantMessage(
      ORDER BY created_at ASC, rowid ASC`,
     [chatId]
   );
-  return rows[rows.length - 1];
+  const row = rows[rows.length - 1];
+  return row ? { ...row, content: String(decrypt(row.content) ?? '') } : undefined;
 }
 
 // Verify a chat belongs to a user (authorization helper).
@@ -299,7 +338,7 @@ export async function createIngestToken(
   await execute(
     `INSERT INTO ingest_tokens (token_hash, user_id, label, created_at)
      VALUES (?, ?, ?, ?)`,
-    [tokenHash, userId, label, Date.now()]
+    [tokenHash, userId, encrypt(label), Date.now()]
   );
 }
 
@@ -323,10 +362,11 @@ export async function touchIngestToken(tokenHash: string): Promise<void> {
 export async function listIngestTokens(
   userId: string
 ): Promise<IngestTokenRow[]> {
-  return select<IngestTokenRow>(
+  const rows = await select<IngestTokenRow>(
     `SELECT * FROM ingest_tokens WHERE user_id = ? ORDER BY created_at DESC`,
     [userId]
   );
+  return rows.map((r) => ({ ...r, label: String(decrypt(r.label) ?? '') }));
 }
 
 export async function deleteIngestToken(
@@ -378,8 +418,12 @@ export async function addDigestItems(
         userId,
         item.source,
         item.day,
-        item.externalId ?? null,
-        JSON.stringify(item.payload ?? null),
+        // Deterministic so re-POSTs of the same item still collide on the
+        // unique (user_id, source, external_id) index and dedupe.
+        item.externalId == null
+          ? null
+          : (encryptDeterministic(String(item.externalId)) as string),
+        encrypt(JSON.stringify(item.payload ?? null)),
         Date.now(),
       ]
     );
@@ -392,11 +436,17 @@ export async function listDigestItems(
   userId: string,
   day: string
 ): Promise<DigestItemRow[]> {
-  return select<DigestItemRow>(
+  const rows = await select<DigestItemRow>(
     `SELECT * FROM digest_items WHERE user_id = ? AND day = ?
      ORDER BY source ASC, created_at ASC`,
     [userId, day]
   );
+  return rows.map((r) => ({
+    ...r,
+    external_id:
+      r.external_id === null ? null : String(decrypt(r.external_id) ?? ''),
+    payload: String(decrypt(r.payload) ?? ''),
+  }));
 }
 
 // Distinct user ids that have any items for a given day (drives the cron loop).
@@ -425,13 +475,13 @@ export async function upsertDigestSummary(
   const info = await execute(
     `UPDATE digest_summaries SET content = ?, created_at = ?
      WHERE user_id = ? AND day = ?`,
-    [content, Date.now(), userId, day]
+    [encrypt(content), Date.now(), userId, day]
   );
   if (info.rowsAffected > 0) return;
   await execute(
     `INSERT INTO digest_summaries (user_id, day, content, created_at)
      VALUES (?, ?, ?, ?)`,
-    [userId, day, content, Date.now()]
+    [userId, day, encrypt(content), Date.now()]
   );
 }
 
@@ -443,18 +493,20 @@ export async function getDigestSummary(
     `SELECT * FROM digest_summaries WHERE user_id = ? AND day = ?`,
     [userId, day]
   );
-  return rows[0];
+  const row = rows[0];
+  return row ? { ...row, content: String(decrypt(row.content) ?? '') } : undefined;
 }
 
 export async function listRecentDigestSummaries(
   userId: string,
   limit = 14
 ): Promise<DigestSummaryRow[]> {
-  return select<DigestSummaryRow>(
+  const rows = await select<DigestSummaryRow>(
     `SELECT * FROM digest_summaries WHERE user_id = ?
      ORDER BY day DESC LIMIT ?`,
     [userId, limit]
   );
+  return rows.map((r) => ({ ...r, content: String(decrypt(r.content) ?? '') }));
 }
 
 // Paginated feed for the infinite scroller. Returns the newest `limit` days
@@ -479,7 +531,11 @@ export async function listDigestSummariesPage(
       );
 
   const hasMore = rows.length > limit;
-  const days = hasMore ? rows.slice(0, limit) : rows;
+  const plaintext = rows.map((r) => ({
+    ...r,
+    content: String(decrypt(r.content) ?? ''),
+  }));
+  const days = hasMore ? plaintext.slice(0, limit) : plaintext;
   const nextCursor = hasMore ? days[days.length - 1].day : null;
   return { days, nextCursor };
 }
@@ -540,17 +596,24 @@ export async function getDigestRun(
     `SELECT * FROM digest_runs WHERE id = ?`,
     [id]
   );
-  return rows[0];
+  const row = rows[0];
+  return row
+    ? { ...row, error: row.error === null ? null : String(decrypt(row.error)) }
+    : undefined;
 }
 
 export async function listPendingDigestRuns(
   limit = 10
 ): Promise<DigestRunRow[]> {
-  return select<DigestRunRow>(
+  const rows = await select<DigestRunRow>(
     `SELECT * FROM digest_runs WHERE status = 'pending'
      ORDER BY requested_at ASC LIMIT ?`,
     [limit]
   );
+  return rows.map((r) => ({
+    ...r,
+    error: r.error === null ? null : String(decrypt(r.error)),
+  }));
 }
 
 // Atomic claim: only succeeds if the row is still 'pending' (guards against
@@ -579,7 +642,7 @@ export async function markDigestRunFailed(
   await execute(
     `UPDATE digest_runs SET status = 'failed', finished_at = ?, error = ?
      WHERE id = ?`,
-    [Date.now(), error.slice(0, 2000), id]
+    [Date.now(), encrypt(error.slice(0, 2000)), id]
   );
 }
 

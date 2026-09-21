@@ -14,6 +14,7 @@
 import { createClient } from '@libsql/client/web';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
+import { sealUsername } from '../src/lib/crypto.mjs';
 
 const REMOTE_URL =
   process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
@@ -82,9 +83,10 @@ async function main() {
     if (client) client.close();
   };
 
+  const sealed = sealUsername(username);
   const existing = await select(
-    'SELECT id FROM users WHERE username = ? COLLATE NOCASE',
-    [username]
+    'SELECT id FROM users WHERE username = ? OR username = ? COLLATE NOCASE',
+    [sealed, username]
   );
   if (existing.length > 0) {
     console.error(`User "${username}" already exists (id=${existing[0].id}).`);
@@ -96,7 +98,7 @@ async function main() {
   await execute(
     `INSERT INTO users (id, username, password_hash, created_at)
      VALUES (?, ?, ?, ?)`,
-    [crypto.randomUUID(), username, hash, Date.now()]
+    [crypto.randomUUID(), sealed, hash, Date.now()]
   );
   await close();
   console.log(`Created user "${username}".`);

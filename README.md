@@ -145,6 +145,7 @@ bleep-ai-chat/
 - 🗂️ **Chat history** - create, switch, delete conversations
 - ⚡ **Optimistic UI** - instant message display
 - 🔒 **Secure** - tunnel encrypts traffic, no exposed ports
+- 🔐 **Encrypted at rest** - chats, messages, digest data, usernames and prompts are AES-256-GCM encrypted in the database
 
 ## Web-Access Agent
 
@@ -182,6 +183,39 @@ support tools.
 
 DuckDuckGo's free HTML endpoint is best-effort: if it is rate-limited or returns
 no results, the assistant still answers without web context rather than failing.
+
+## Data encryption (at rest)
+
+Everything sensitive is encrypted **before** it is written to the database, so a
+stolen SQLite file or a Turso dump reveals only opaque ciphertext. This covers
+chat titles, message bodies, digest payloads (emails, calendar events, Slack
+messages, Zoom recaps), daily summaries, ingest-token labels, usernames, and
+rate-limit keys. Structural columns (row ids, `user_id`, timestamps, `source`,
+`day`, `status`) stay in the clear so indexes and joins keep working; they expose
+ordering and counts, not content.
+
+- Algorithm: AES-256-GCM (authenticated). Random IVs for free text, and a
+  key-derived IV for values that must stay equality-searchable (usernames,
+  external ids, rate-limit keys).
+- Key: `ENCRYPTION_KEY` (32 bytes, base64 or hex). When unset, a key is derived
+  from `SESSION_SECRET` for dev. **Set a dedicated `ENCRYPTION_KEY` and use the
+  exact same value for the Vercel app and the box-side `digest-worker`.** Never
+  change it once data exists, or that data becomes unreadable.
+- Shared implementation: `src/lib/crypto.mjs`, used by the app
+  (`src/lib/queries.ts`, `src/lib/rateLimit.ts`) and by
+  `scripts/digest-worker.mjs`.
+
+Migrating existing plaintext rows (back up first):
+
+```bash
+node --env-file=.env.local scripts/encrypt-existing-data.mjs --dry-run
+node --env-file=.env.local scripts/encrypt-existing-data.mjs
+```
+
+Trust boundary: the server must decrypt data to send it to the model and back to
+the browser, so this protects data **at rest** (database/backups), not a
+compromised running server. There are no server-readable files stored on disk
+outside the database; uploads/payloads live in encrypted DB columns.
 
 ## Available Models
 

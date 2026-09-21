@@ -55,6 +55,7 @@ import {
   callDigestModel,
   CONTEXT_WINDOW,
 } from '../src/lib/digestCore.mjs';
+import { encrypt, decrypt } from '../src/lib/crypto.mjs';
 
 const REMOTE_URL = process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
 const REMOTE_TOKEN = process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN || '';
@@ -169,14 +170,17 @@ function releaseLock() {
 // ---------- Core work ----------
 
 async function upsertDigestSummary(db, userId, day, content) {
+  // Encrypt at rest exactly like src/lib/queries.ts does, so the Next app can
+  // read it back. The worker and the app must share the same ENCRYPTION_KEY.
+  const sealed = encrypt(content);
   const info = await db.execute(
     `UPDATE digest_summaries SET content = ?, created_at = ? WHERE user_id = ? AND day = ?`,
-    [content, Date.now(), userId, day]
+    [sealed, Date.now(), userId, day]
   );
   if (info.rowsAffected > 0) return;
   await db.execute(
     `INSERT INTO digest_summaries (user_id, day, content, created_at) VALUES (?, ?, ?, ?)`,
-    [userId, day, content, Date.now()]
+    [userId, day, sealed, Date.now()]
   );
 }
 
@@ -191,10 +195,13 @@ async function processRun(db, run) {
   }
 
   try {
-    const rows = await db.select(
-      `SELECT * FROM digest_items WHERE user_id = ? AND day = ? ORDER BY source ASC, created_at ASC`,
-      [run.user_id, run.day]
-    );
+    // Payloads are encrypted at rest; decrypt before building the prompt.
+    const rows = (
+      await db.select(
+        `SELECT * FROM digest_items WHERE user_id = ? AND day = ? ORDER BY source ASC, created_at ASC`,
+        [run.user_id, run.day]
+      )
+    ).map((r) => ({ ...r, payload: decrypt(r.payload) }));
     if (rows.length === 0) {
       log(`  no items for user=${run.user_id} day=${run.day}; marking done with nothing to say`);
       await db.execute(`UPDATE digest_runs SET status = 'done', finished_at = ? WHERE id = ?`, [
@@ -238,7 +245,7 @@ async function processRun(db, run) {
     log(`  FAILED: ${message}`);
     await db.execute(
       `UPDATE digest_runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?`,
-      [Date.now(), message.slice(0, 2000), run.id]
+      [Date.now(), encrypt(message.slice(0, 2000)), run.id]
     );
   }
 }

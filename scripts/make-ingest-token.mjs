@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { encrypt, sealUsername } from '../src/lib/crypto.mjs';
 
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db');
 const username = process.argv[2] || 'digest-tester';
@@ -32,11 +33,16 @@ db.exec(`
 `);
 
 // Reuse existing user or create one (password isn't needed for ingest testing).
-let user = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE').get(username);
+// Usernames are stored encrypted, so check both the sealed and any legacy
+// plaintext form.
+const sealedUsername = sealUsername(username);
+let user = db
+  .prepare('SELECT id FROM users WHERE username = ? OR username = ? COLLATE NOCASE')
+  .get(sealedUsername, username);
 if (!user) {
   const id = crypto.randomUUID();
   db.prepare('INSERT INTO users (id, username, password_hash, created_at) VALUES (?,?,?,?)')
-    .run(id, username, 'x', Date.now());
+    .run(id, sealedUsername, 'x', Date.now());
   user = { id };
   console.log(`Created user "${username}" (id=${id})`);
 } else {
@@ -47,7 +53,7 @@ if (!user) {
 const token = 'ingest_' + crypto.randomBytes(24).toString('base64url');
 const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 db.prepare('INSERT INTO ingest_tokens (token_hash, user_id, label, created_at) VALUES (?,?,?,?)')
-  .run(tokenHash, user.id, 'apps-script-local-test', Date.now());
+  .run(tokenHash, user.id, encrypt('apps-script-local-test'), Date.now());
 db.close();
 
 console.log('\n=== INGEST TOKEN (paste into Apps Script Script Property INGEST_TOKEN) ===');

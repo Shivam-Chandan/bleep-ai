@@ -56,6 +56,7 @@ const SCHEMA = [
      role       TEXT NOT NULL,
      content    TEXT NOT NULL,
      created_at INTEGER NOT NULL,
+     sources    TEXT,
      FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
    )`,
   `CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, updated_at DESC)`,
@@ -200,12 +201,36 @@ function getDriver(): Promise<Driver> {
   return global.__dbDriver__;
 }
 
+// Migrate databases created before the messages.sources column existed.
+// CREATE TABLE IF NOT EXISTS above never alters an existing table, so the
+// column is added explicitly (safe to run; guarded by a pragma probe and a
+// swallowed duplicate-column error on remote libSQL).
+async function ensureMessagesSources(driver: Driver): Promise<void> {
+  let hasColumn = false;
+  try {
+    const cols = await driver.select<{ name: string }>(
+      `SELECT name FROM pragma_table_info('messages')`,
+      []
+    );
+    hasColumn = cols.some((c) => c.name === 'sources');
+  } catch {
+    // No pragma table function on this backend — fall through to ALTER below.
+  }
+  if (hasColumn) return;
+  try {
+    await driver.execute(`ALTER TABLE messages ADD COLUMN sources TEXT`, []);
+  } catch {
+    // Column already exists (concurrent migrate) or table missing — both fine.
+  }
+}
+
 function ensureSchema(): Promise<void> {
   if (!global.__dbSchema__) {
     global.__dbSchema__ = (async () => {
       const driver = await getDriver();
       // Single batch so the whole schema costs one round trip, not ~14.
       await driver.batch(SCHEMA.map((sql) => ({ sql, args: [] })));
+      await ensureMessagesSources(driver);
     })();
   }
   return global.__dbSchema__;

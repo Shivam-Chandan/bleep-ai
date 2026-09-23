@@ -55,7 +55,15 @@ export async function GET(
         const active = isActive(id);
         // First event is always the state snapshot: active tells the client
         // whether to keep listening, messageId + content is the persisted copy.
-        send({ type: 'resume', active, messageId: last?.id, content: last?.content });
+        send({
+          type: 'resume',
+          active,
+          messageId: last?.id,
+          content: last?.content,
+          ...(last?.sources && last.sources.length > 0
+            ? { sources: last.sources }
+            : {}),
+        });
         if (!active) {
           send({ type: 'done', messageId: last?.id });
           controller.close();

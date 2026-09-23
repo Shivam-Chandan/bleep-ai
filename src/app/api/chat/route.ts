@@ -15,6 +15,7 @@ import { requireSession } from '@/lib/auth';
 import {
   addAssistantChunk,
   getOwnedChatMeta,
+  saveAssistantSources,
   saveUserTurn,
   type ChatMessageMeta,
 } from '@/lib/queries';
@@ -208,6 +209,22 @@ export async function POST(request: NextRequest) {
             message,
             ...(code ? { code } : {}),
             messageId: answerId,
+          });
+        },
+        // Persist the web-search reference links the moment they are known, and
+        // broadcast them on the resume bus so a reconnecting client receives
+        // them even if it subscribed after the direct stream emitted them.
+        onAssistantSources: async (sources) => {
+          if (!chatId || sources.length === 0) return;
+          try {
+            await saveAssistantSources(chatId, answerId, sources);
+          } catch (e) {
+            console.error('Failed to save sources:', e);
+          }
+          publish(chatId, {
+            type: 'sources',
+            messageId: answerId,
+            sources,
           });
         },
       });

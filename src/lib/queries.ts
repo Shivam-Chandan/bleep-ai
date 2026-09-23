@@ -9,6 +9,7 @@ import {
   normalizeUsername,
   sealUsername,
 } from './crypto.mjs';
+import type { Source } from './types';
 
 export interface UserRow {
   id: string;
@@ -31,6 +32,47 @@ export interface MessageRow {
   role: 'user' | 'assistant';
   content: string;
   created_at: number;
+  // Reference links behind a web-search-grounded answer. Stored as encrypted
+  // JSON; null when the answer didn't use web search.
+  sources: Source[] | null;
+}
+
+// Same shape as MessageRow but the encrypted, unparsed `sources` payload as
+// SELECT returns it — used for the raw query before parseSources runs.
+interface RawMessageRow {
+  id: string;
+  chat_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: number;
+  sources: string | null;
+}
+
+// Decrypt + validate the persisted sources payload into a type-safe array.
+function parseSources(raw: string | null | undefined): Source[] | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(String(decrypt(raw) ?? ''));
+    if (!Array.isArray(parsed)) return null;
+    const sources = parsed.filter(
+      (s): s is Source =>
+        typeof s === 'object' &&
+        s !== null &&
+        typeof (s as Source).title === 'string' &&
+        typeof (s as Source).url === 'string'
+    );
+    return sources.length > 0 ? sources : null;
+  } catch {
+    return null;
+  }
+}
+
+function toMessageRow(r: RawMessageRow): MessageRow {
+  return {
+    ...r,
+    content: String(decrypt(r.content) ?? ''),
+    sources: parseSources(r.sources),
+  };
 }
 
 // ---------- Users ----------
@@ -187,11 +229,11 @@ export async function deleteChat(
 // ---------- Messages ----------
 
 export async function listMessages(chatId: string): Promise<MessageRow[]> {
-  const rows = await select<MessageRow>(
+  const rows = await select<RawMessageRow>(
     `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC`,
     [chatId]
   );
-  return rows.map((r) => ({ ...r, content: String(decrypt(r.content) ?? '') }));
+  return rows.map(toMessageRow);
 }
 
 // Lightweight per-chat metadata used before persisting a new user turn: the
@@ -239,6 +281,7 @@ export async function addMessage(
     role,
     content,
     created_at: Date.now(),
+    sources: null,
   };
   await execute(
     `INSERT INTO messages (id, chat_id, role, content, created_at)
@@ -303,13 +346,34 @@ export async function addAssistantChunk(
 export async function getLastAssistantMessage(
   chatId: string
 ): Promise<MessageRow | undefined> {
-  const rows = await select<MessageRow>(
+  const rows = await select<RawMessageRow>(
     `SELECT * FROM messages WHERE chat_id = ? AND role = 'assistant'
      ORDER BY created_at ASC, rowid ASC`,
     [chatId]
   );
   const row = rows[rows.length - 1];
-  return row ? { ...row, content: String(decrypt(row.content) ?? '') } : undefined;
+  return row ? toMessageRow(row) : undefined;
+}
+
+// Persist the reference links behind a web-search-grounded answer the moment
+// they are known (before the answer streams), so they survive a reload or a
+// dropped connection. The message row is created empty if the first chunk has
+// not landed yet; later content UPSERTs preserve this column.
+export async function saveAssistantSources(
+  chatId: string,
+  messageId: string,
+  sources: Source[]
+): Promise<void> {
+  const now = Date.now();
+  await batch([
+    {
+      sql: `INSERT INTO messages (id, chat_id, role, content, sources, created_at)
+            VALUES (?, ?, 'assistant', '', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET sources = excluded.sources`,
+      args: [messageId, chatId, encrypt(JSON.stringify(sources)), now],
+    },
+    { sql: `UPDATE chats SET updated_at = ? WHERE id = ?`, args: [now, chatId] },
+  ]);
 }
 
 // Verify a chat belongs to a user (authorization helper).

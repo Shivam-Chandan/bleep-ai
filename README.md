@@ -169,8 +169,15 @@ Search is decided per model type so slow local models stay responsive:
   search. The answer is then streamed in a **single model call** — there is no
   separate non-streaming "decide" round trip, which roughly halves latency.
 - **Cloud models** (`openrouter/free`) are fast enough to keep LLM-decided tool
-  calling: the model calls a free DuckDuckGo `web_search` tool (no API key) when
-  it needs live data, and the grounded answer is streamed back with citations.
+  calling: the model calls a free `web_search` tool (no API key) when it needs
+  live data, and the grounded answer is streamed back with citations.
+
+The search itself is plain-HTTP from the server (no API key, no headless
+browser): **Bing** by default, falling back to **DuckDuckGo**'s HTML endpoint
+when Bing fails or returns no results. Set `SEARCH_PROVIDER=bing|ddg` to pin a
+single provider, or leave it at `auto` (default). Startpage/Google are not
+used: Google requires JavaScript to render its SERP and Startpage sits behind
+an anti-bot proof-of-work wall, so both would need a browser on the box.
 
 Simple questions (greetings, arithmetic, general knowledge) are answered directly
 without a search. Tools never block the stream: local answers start streaming
@@ -193,8 +200,9 @@ support tools.
 - **Tuning:** `SEARCH_MAX_RESULTS` (default `5`) controls how many results are injected,
   and `OLLAMA_MAX_TOKENS` caps the length of local replies.
 
-DuckDuckGo's free HTML endpoint is best-effort: if it is rate-limited or returns
-no results, the assistant still answers without web context rather than failing.
+The free HTML endpoints are best-effort: if a provider is rate-limited or
+returns no results, the server falls back to the next provider (Bing → DDG) and
+otherwise answers without web context rather than failing.
 
 ## Data encryption (at rest)
 

@@ -165,6 +165,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                     message?: string;
                     messageId?: string;
                     code?: string;
+                    sources?: { title: string; url: string }[];
                   }>(line);
                   if (!parsed) continue;
                   const targetId = parsed.messageId || answerId;
@@ -177,6 +178,13 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                       onContent(parsed.content);
                       updateMessage(chatId, targetId, parsed.content);
                     }
+                    if (parsed.sources) {
+                      updateMessageSources(chatId, targetId, parsed.sources);
+                    }
+                    continue;
+                  }
+                  if (parsed.type === 'sources' && parsed.sources) {
+                    updateMessageSources(chatId, targetId, parsed.sources);
                     continue;
                   }
                   if (parsed.type === 'content' && parsed.content) {
@@ -242,7 +250,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       setChatStatus(chatId, 'The server is still saving this response — you can reload the page to see it.');
       return false;
     },
-    [setChatStatus, setError, setChatStreaming, updateMessage]
+    [setChatStatus, setError, setChatStreaming, updateMessage, updateMessageSources]
   );
 
   // Probe once for a possibly-still-running generation when this chat loads

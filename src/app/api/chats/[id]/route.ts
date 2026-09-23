@@ -27,6 +27,7 @@ export async function GET(
       role: m.role,
       content: m.content,
       timestamp: new Date(m.created_at).toISOString(),
+      ...(m.sources && m.sources.length > 0 ? { sources: m.sources } : {}),
     })),
   });
 }

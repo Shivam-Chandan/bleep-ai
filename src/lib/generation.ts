@@ -17,10 +17,11 @@ import { EventEmitter } from 'node:events';
  */
 
 export interface GenerationEvent {
-  type: 'resume' | 'content' | 'done' | 'interrupted' | 'error';
+  type: 'resume' | 'content' | 'done' | 'interrupted' | 'error' | 'sources';
   active?: boolean;
   messageId?: string;
   content?: string;
+  sources?: { title: string; url: string }[];
   message?: string;
   code?: string;
 }

@@ -6,14 +6,22 @@ export interface SearchResult {
   snippet: string;
 }
 
+type SearchProvider = 'bing' | 'ddg';
+
+const BING_URL = 'https://www.bing.com/search';
 const DDG_HTML_URL = 'https://html.duckduckgo.com/html/';
-const DDG_USER_AGENT =
+const SEARCH_USER_AGENT =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 
 export const SEARCH_MAX_RESULTS = Math.max(
   1,
   Math.min(10, Number(process.env.SEARCH_MAX_RESULTS) || 5)
 );
+
+function configuredProvider(): SearchProvider | 'auto' {
+  const value = String(process.env.SEARCH_PROVIDER || 'auto').toLowerCase();
+  return value === 'bing' || value === 'ddg' ? value : 'auto';
+}
 
 function decodeDdgHref(href: string): string {
   try {
@@ -24,7 +32,30 @@ function decodeDdgHref(href: string): string {
   }
 }
 
-export function parseResults(html: string): SearchResult[] {
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'");
+}
+
+function decodeBingHref(href: string): string {
+  if (!href.startsWith('https://www.bing.com/ck/')) return href;
+  try {
+    const url = new URL(decodeEntities(href));
+    const encoded = url.searchParams.get('u');
+    if (!encoded) return href;
+    const decoded = Buffer.from(encoded.replace(/^a1/, ''), 'base64url').toString('utf8');
+    return decoded && decoded.startsWith('http') ? decoded : href;
+  } catch {
+    return href;
+  }
+}
+
+export function parseDdgResults(html: string): SearchResult[] {
   const results: SearchResult[] = [];
   const blocks = html.split('result results_links results_links_deep web-result');
   for (const block of blocks.slice(1)) {
@@ -32,33 +63,78 @@ export function parseResults(html: string): SearchResult[] {
     const hrefMatch = block.match(/class="result__a"[^>]*href="([^"]+)"/);
     const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/div>/);
     if (!titleMatch || !hrefMatch) continue;
-    const title = titleMatch[1].replace(/<[^>]+>/g, '').trim();
-    const snippet = (snippetMatch ? snippetMatch[1] : '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const title = decodeEntities(titleMatch[1].replace(/<[^>]+>/g, '').trim());
+    const snippet = decodeEntities(
+      (snippetMatch ? snippetMatch[1] : '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
     if (!title) continue;
     results.push({ title, url: decodeDdgHref(hrefMatch[1]), snippet });
   }
   return results;
 }
 
-export async function searchWeb(query: string, max = SEARCH_MAX_RESULTS): Promise<SearchResult[]> {
-  const clean = query.replace(/[\r\n]+/g, ' ').trim().slice(0, 300);
-  if (!clean) return [];
+export function parseBingResults(html: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  const blocks = html.split('<li class="b_algo"');
+  for (const block of blocks.slice(1)) {
+    const titleMatch = block.match(/<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/);
+    if (!titleMatch) continue;
+    const title = decodeEntities(titleMatch[2].replace(/<[^>]+>/g, '').trim());
+    if (!title) continue;
+    const snippetMatch = block.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/);
+    const snippet = decodeEntities(
+      (snippetMatch ? snippetMatch[1] : '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
+    results.push({ title, url: decodeBingHref(titleMatch[1]), snippet });
+  }
+  return results;
+}
 
-  const url = new URL(DDG_HTML_URL);
-  url.searchParams.set('q', clean);
-
+async function fetchHtml(url: URL): Promise<string> {
   const response = await fetch(url.toString(), {
-    headers: { 'User-Agent': DDG_USER_AGENT },
+    headers: {
+      'User-Agent': SEARCH_USER_AGENT,
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
     // The free search is best-effort: don't let upstream delays stall the model.
     signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) {
-    throw new Error(`DuckDuckGo search failed: ${response.status}`);
+    throw new Error(`search failed: ${response.status}`);
   }
-  return parseResults(await response.text()).slice(0, max);
+  return response.text();
+}
+
+async function bingSearch(query: string): Promise<SearchResult[]> {
+  const url = new URL(BING_URL);
+  url.searchParams.set('q', query);
+  return parseBingResults(await fetchHtml(url));
+}
+
+async function ddgSearch(query: string): Promise<SearchResult[]> {
+  const url = new URL(DDG_HTML_URL);
+  url.searchParams.set('q', query);
+  return parseDdgResults(await fetchHtml(url));
+}
+
+export async function searchWeb(query: string, max = SEARCH_MAX_RESULTS): Promise<SearchResult[]> {
+  const clean = query.replace(/[\r\n]+/g, ' ').trim().slice(0, 300);
+  if (!clean) return [];
+
+  const mode = configuredProvider();
+  const chain: SearchProvider[] = mode === 'auto' ? ['bing', 'ddg'] : [mode];
+
+  for (const provider of chain) {
+    const results = await (provider === 'bing' ? bingSearch : ddgSearch)(clean).catch(() => []);
+    if (results.length > 0) return results.slice(0, max);
+  }
+  return [];
 }
 
 export function formatSearchContext(results: SearchResult[]): string {

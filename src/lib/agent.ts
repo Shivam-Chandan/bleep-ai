@@ -2,7 +2,7 @@ import 'server-only';
 import { OLLAMA_BASE_URL, OLLAMA_NUM_GPU, OLLAMA_NUM_THREAD, ollamaAuthHeader } from './ollama';
 import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
-import { INTERRUPT_SUFFIX } from './types';
+import { INTERRUPT_SUFFIX, type Source } from './types';
 import { ModelError, isAbortError, isModelError, modelFetch, type ModelErrorCode } from './modelErrors';
 import { sseEncode, SSE_HEARTBEAT } from './sse';
 
@@ -488,6 +488,10 @@ export interface AgentResponseOptions {
   // Called when the model call fails mid-stream so the caller can finalise
   // (e.g. notify reconnected listeners) instead of leaving it running.
   onError?: (message: string, code?: ModelErrorCode) => void | Promise<void>;
+  // Called with the web-search reference links as soon as they are known
+  // (before any answer tokens stream), so the caller can persist them even if
+  // the connection drops mid-generation.
+  onAssistantSources?: (sources: Source[]) => void | Promise<void>;
 }
 
 export interface PreparedResponse {
@@ -757,6 +761,15 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
       };
       try {
         if (mode !== 'direct') {
+          // Persist the reference links before announcing them, so a client
+          // that reconnects mid-generation still gets them from the DB.
+          try {
+            await opts.onAssistantSources?.(
+              sources.map((s) => ({ title: s.title, url: s.url }))
+            );
+          } catch (e) {
+            console.error('Failed to persist sources:', e);
+          }
           emit({ type: 'status', text: 'Searching the web…' });
           emit({
             type: 'sources',

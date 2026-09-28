@@ -1,0 +1,28 @@
+# qwen2.5:7b-ngl6 — the only way to run the 7B reliably on this box.
+#
+# Hardware: NVIDIA GeForce 840M (2 GB VRAM), 2C/4T Haswell, 7.7 GB RAM.
+# See docs/BENCHMARKING.md for the measurements behind these numbers.
+#
+# The 7B's automatic GPU split CRASHES on this 2 GB GPU, so the offload
+# constraint is pinned into the model tag. That way every caller (warm script,
+# digest worker, chat API) loads it correctly without having to pass num_gpu
+# itself — the failure mode is a crash, not a slow request.
+#
+#   num_gpu 6    max layers that fit in 2 GB VRAM at the digest's 8192 context.
+#                Measured: 8 OOMs at num_ctx>=4096, 6 is the stable max.
+#                6/28 layers on GPU, ~22/28 on CPU.
+#   num_thread 2 physical cores. A/B measured: 2 threads = 2.00 tok/s,
+#                4 hyperthreads = 1.05 tok/s. Using 4 HALVES decode speed
+#                because the threads contend for 2 physical cores and saturate
+#                DDR3 bandwidth. Do not raise this.
+#
+# Apply with:
+#   ollama create qwen2.5:7b-ngl6 -f Modelfile.ngl6
+#
+# This shares the 4.7 GB of weights with qwen2.5:7b (FROM below) — it does not
+# duplicate them on disk.
+
+FROM qwen2.5:7b
+
+PARAMETER num_gpu 6
+PARAMETER num_thread 2

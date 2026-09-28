@@ -68,6 +68,15 @@ const OLLAMA_AUTH_HEADER = process.env.OLLAMA_AUTH_TOKEN
   : {};
 const POLL_SECONDS = Number(process.env.DIGEST_WORKER_POLL_SECONDS) || 300;
 const STALE_MS = Number(process.env.DIGEST_WORKER_STALE_MS) || 30 * 60_000;
+// How long to wait for the model to be resident before generating. Ollama
+// serializes requests, and a cold load takes minutes on this box — without
+// this gate, a digest request queues behind the load and undici's default
+// 300s headersTimeout aborts it (HeaderseTimeoutError). Keeping it bounded
+// means a truly-stuck Ollama still surfaces as a fast 'failed' run.
+const READY_WAIT_MS = Number(process.env.DIGEST_WORKER_READY_WAIT_MS) || 10 * 60_000;
+// Bounded retries for transient fetch failures (queueing behind warm, DERP
+// rebind, DNS hiccup, etc.) — a genuine model error is NOT retried.
+const GENERATE_ATTEMPTS = Number(process.env.DIGEST_WORKER_GENERATE_ATTEMPTS) || 3;
 
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
@@ -184,6 +193,74 @@ async function upsertDigestSummary(db, userId, day, content) {
   );
 }
 
+// A bare fetch failure (network blip, queueing behind Ollama's serialized
+// request slot, tunnel restart) is transient and worth retrying; a real model
+// error (bad status, Ollama {"error":...}) is not — retrying those just
+// burns minutes. Classify by message so only the former gets extra attempts.
+function isTransientError(err) {
+  const msg =
+    (err instanceof Error ? err.message : String(err)) +
+    (err instanceof Error && err.cause ? ` ${String(err.cause)}` : '');
+  return /fetch failed|timeout|etimedout|econnreset|econnrefused|socket hang up|network|headertim|undici|abort/i.test(
+    msg
+  );
+}
+
+// Waits (bounded) for the configured model to show up in Ollama's /api/ps.
+// Ollama processes one request at a time; a cold load takes minutes, so a
+// digest request issued mid-load would queued behind it and die on undici's
+// default 300s headersTimeout. Waiting for residency first makes the load's
+// internal warm-up overlap the wait instead of the request deadline.
+async function waitForModelReady() {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const res = await fetch(`${OLLAMA_URL}/api/ps`, {
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const resident = (data.models || []).some(
+          (m) => m.name.split(':')[0] === OLLAMA_MODEL.split(':')[0]
+        );
+        if (resident) return;
+        log('  model not resident yet; waiting for it to finish loading...');
+      }
+    } catch {
+      // Ollama briefly unreachable; keep polling until the timeout below.
+    }
+    if (Date.now() - t0 > READY_WAIT_MS) {
+      log(
+        `  WARN model not resident within ${(READY_WAIT_MS / 1000).toFixed(0)}s; generating anyway (may queue behind the load)`
+      );
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+}
+
+// Wraps callDigestModel with a small number of attempts for transient fetch
+// failures (with backoff). A permanent model error propagates immediately.
+async function generateWithRetry(args) {
+  let lastErr;
+  for (let attempt = 1; attempt <= GENERATE_ATTEMPTS; attempt++) {
+    try {
+      return await callDigestModel(args);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err)) throw err;
+      if (attempt < GENERATE_ATTEMPTS) {
+        const wait = 30_000 * attempt;
+        log(
+          `  transient error (${err instanceof Error ? err.message : String(err)}); retrying ${attempt}/${GENERATE_ATTEMPTS} in ${(wait / 1000).toFixed(0)}s`
+        );
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function processRun(db, run) {
   const claimed = await db.execute(
     `UPDATE digest_runs SET status = 'processing', started_at = ? WHERE id = ? AND status = 'pending'`,
@@ -214,10 +291,11 @@ async function processRun(db, run) {
     const prompt = buildDigestPrompt(run.day, rows);
     log(`  generating: user=${run.user_id} day=${run.day} items=${rows.length} promptChars=${prompt.length}`);
     const t0 = Date.now();
-    // No AbortSignal deadline race here beyond callDigestModel's own generous
-    // crash-protection timeout — this is the whole point of running here
-    // instead of on Vercel. Output length/quality is never traded for speed.
-    const content = await callDigestModel({
+    // Wait for the model to be resident (the load's internal warmup overlaps
+    // our wait rather than eating into undici's request deadline), then
+    // generate with bounded retries for transient fetch timeouts.
+    await waitForModelReady();
+    const content = await generateWithRetry({
       baseUrl: OLLAMA_URL,
       model: OLLAMA_MODEL,
       authHeader: OLLAMA_AUTH_HEADER,

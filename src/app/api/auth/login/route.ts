@@ -35,7 +35,13 @@ export async function POST(request: NextRequest) {
     await Promise.all([clearAttempts(`login:u:${uname}`), clearAttempts(`login:ip:${ip}`)]);
     await createSession(user.id, user.username);
     return NextResponse.json({ ok: true, username: user.username });
-  } catch {
-    return NextResponse.json({ error: 'Bad request' }, { status: 400 });
+  } catch (error) {
+    // Never report an infrastructure failure as bad credentials: a blanket 400
+    // hid a database outage behind "Invalid username or password" for hours.
+    console.error('Login failed:', error);
+    return NextResponse.json(
+      { error: 'Login temporarily unavailable. Please try again.' },
+      { status: 500 }
+    );
   }
 }

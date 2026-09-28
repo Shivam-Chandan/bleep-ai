@@ -192,11 +192,23 @@ declare global {
   var __dbSchema__: Promise<void> | undefined;
 }
 
+// Evict the cached promise when it rejects. A cached rejection is permanent for
+// the life of the serverless instance, so a single transient outage (box reboot,
+// Funnel/DERP blip) would make every later request re-throw instantly without
+// ever retrying the connection. Evicting lets the next request reconnect.
+function retryable<T>(cache: '__dbDriver__' | '__dbSchema__', init: Promise<T>): Promise<T> {
+  return init.catch((error) => {
+    global[cache] = undefined;
+    throw error;
+  });
+}
+
 function getDriver(): Promise<Driver> {
   if (!global.__dbDriver__) {
-    global.__dbDriver__ = usingRemote
-      ? createRemoteDriver()
-      : createLocalDriver();
+    global.__dbDriver__ = retryable(
+      '__dbDriver__',
+      usingRemote ? createRemoteDriver() : createLocalDriver()
+    );
   }
   return global.__dbDriver__;
 }
@@ -226,12 +238,15 @@ async function ensureMessagesSources(driver: Driver): Promise<void> {
 
 function ensureSchema(): Promise<void> {
   if (!global.__dbSchema__) {
-    global.__dbSchema__ = (async () => {
-      const driver = await getDriver();
-      // Single batch so the whole schema costs one round trip, not ~14.
-      await driver.batch(SCHEMA.map((sql) => ({ sql, args: [] })));
-      await ensureMessagesSources(driver);
-    })();
+    global.__dbSchema__ = retryable(
+      '__dbSchema__',
+      (async () => {
+        const driver = await getDriver();
+        // Single batch so the whole schema costs one round trip, not ~14.
+        await driver.batch(SCHEMA.map((sql) => ({ sql, args: [] })));
+        await ensureMessagesSources(driver);
+      })()
+    );
   }
   return global.__dbSchema__;
 }
@@ -257,4 +272,11 @@ export async function batch(statements: BatchStatement[]): Promise<void> {
   return (await getDriver()).batch(
     statements.map((s) => ({ sql: s.sql, args: s.args ?? [] }))
   );
+}
+
+// Lightweight liveness probe for /api/health and uptime checks. Deliberately
+// skips ensureSchema() so a health ping never pays the ~14-statement schema
+// batch — it only proves the driver can reach the database and run a query.
+export async function pingDb(): Promise<void> {
+  await (await getDriver()).execute('SELECT 1', []);
 }

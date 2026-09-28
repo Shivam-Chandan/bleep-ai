@@ -7,6 +7,9 @@
   "functions": {
     "src/app/api/chat/route.ts": {
       "maxDuration": 300
+    },
+    "src/app/api/attachments/route.ts": {
+      "maxDuration": 300
     }
   },
   "crons": [

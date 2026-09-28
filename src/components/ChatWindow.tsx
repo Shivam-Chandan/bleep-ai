@@ -7,6 +7,12 @@ import { ApiError, extractCode, hintFor } from '@/lib/chatError';
 import { parseSseLine } from '@/lib/sse';
 import { MarkdownMessage } from './MarkdownMessage';
 import { MessageSkeleton } from './Skeleton';
+import { AttachmentChip } from './AttachmentChip';
+import {
+  AttachButton,
+  AttachmentChips,
+  useAttachmentUploads,
+} from './AttachmentPicker';
 
 interface ChatWindowProps {
   className?: string;
@@ -64,6 +70,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
   const setChatStreaming = useChatStore((s) => s.setChatStreaming);
   const setChatStatus = useChatStore((s) => s.setChatStatus);
   const messagesLoading = useChatStore((s) => s.messagesLoading);
+  const chatAttachments = useChatStore((s) =>
+    currentChatId ? s.chatAttachments[currentChatId] : undefined
+  );
+  const bindAttachments = useChatStore((s) => s.bindAttachments);
   const [inputValue, setInputValue] = useState('');
   const [liveElapsed, setLiveElapsed] = useState(0);
   const [messageDurations, setMessageDurations] = useState<Record<string, number>>({});
@@ -95,13 +105,22 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
 
   const selectedModelInfo = models.find((m) => m.id === selectedModel);
   const contextWindow = selectedModelInfo?.contextWindow ?? 8192;
-  const usedTokens = messages.reduce(
-    (sum, m) => sum + Math.ceil(m.content.length / 4) + 4,
+  // The extracted file text is sent on every turn, so it counts against the
+  // window for as long as it is attached — otherwise the meter looks empty
+  // right as the prompt is about to overflow.
+  const attachmentTokens = (chatAttachments ?? []).reduce(
+    (sum, a) => sum + Math.ceil(a.chars / 4) + 4,
     0
   );
+  const usedTokens =
+    messages.reduce((sum, m) => sum + Math.ceil(m.content.length / 4) + 4, 0) +
+    attachmentTokens;
 
   const localModels = models.filter((m) => m.provider === 'local');
   const cloudModels = models.filter((m) => m.provider === 'openrouter');
+  // Files staged for the next message. Uploading is blocked mid-generation so
+  // the prompt the server builds cannot change under an in-flight answer.
+  const uploads = useAttachmentUploads(currentChatId ?? '');
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -288,12 +307,24 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
     setError(null);
     setResumeFlag(rawChatId);
 
-    addMessage(rawChatId, { role: 'user', content: userMessage });
-
     // A brand-new chat is created optimistically; wait for its real server id
-    // before talking to the API. Existing chats resolve instantly.
+    // before talking to the API. Existing chats resolve instantly. Attachments
+    // are uploaded against the resolved id, so resolve before reading the
+    // composer's file list.
     const chatId = await resolveChatId(rawChatId);
     setResumeFlag(chatId);
+
+    // Claim the files the user staged: the server binds whatever is still
+    // unbound when it saves this turn, and mirroring that here moves the chips
+    // from the composer onto the message bubble without a reload.
+    const staged =
+      useChatStore.getState().chatAttachments[chatId]?.filter((a) => !a.messageId) ?? [];
+    const userMessageId = addMessage(chatId, {
+      role: 'user',
+      content: userMessage,
+      ...(staged.length > 0 ? { attachments: staged } : {}),
+    }).id;
+    bindAttachments(chatId, userMessageId);
 
     // Build the request from history *before* adding the empty assistant
     // placeholder, so the server sees the user message as the last turn.
@@ -676,7 +707,25 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
             <span>Ollama is unreachable right now — local models may fail to respond. Try again in a minute or switch to a cloud model.</span>
           </div>
         )}
+        <div
+          className={`max-w-3xl mx-auto mb-2 rounded-2xl transition-colors ${
+            uploads.dragging ? 'ring-2 ring-primary/50 bg-primary/5 p-2 -m-2' : ''
+          }`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!isStreaming && !uploads.atLimit) uploads.setDragging(true);
+          }}
+          onDragLeave={() => uploads.setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            uploads.setDragging(false);
+            if (!isStreaming && !uploads.atLimit) void uploads.addFiles(e.dataTransfer.files);
+          }}
+        >
+          <AttachmentChips uploads={uploads} />
+        </div>
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
+          <AttachButton uploads={uploads} disabled={isStreaming} />
           <textarea
             ref={textareaRef}
             value={inputValue}
@@ -813,6 +862,13 @@ const MessageBubble = memo(function MessageBubble({
             : 'bg-muted rounded-bl-md'
         }`}
       >
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5 border-b border-current/20 pb-2">
+            {message.attachments.map((attachment) => (
+              <AttachmentChip key={attachment.id} attachment={attachment} />
+            ))}
+          </div>
+        )}
         {message.role === 'assistant' ? (
           thinking ? (
             <ThinkingIndicator statusText={statusText ?? null} />

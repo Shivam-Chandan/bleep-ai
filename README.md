@@ -90,12 +90,32 @@ required) and for anything else that can't reach the tailnet IP directly.
 
 The Funnel can silently stop serving public traffic (stale control-plane state,
 or tailscaled losing its control/DERP path after an interface/gateway change)
-while still working from inside the tailnet — prod then fails `/api/health` at
-~320ms. `bleep-tailscale-watchdog.timer` (every minute) runs
-`scripts/tailscale-watchdog.sh`, which pings prod health and, after 3
-consecutive failures (outside a 5-min cooldown), escalates: restart tailscaled →
-re-assert the funnel → `tailscale funnel reset` + re-issue if still failing, then
-re-checks. State lives in `/tmp/bleep-tailscale-watchdog/`.
+while still working from inside the tailnet. `bleep-tailscale-watchdog.timer`
+(every minute) runs `scripts/tailscale-watchdog.sh`, which probes the public
+Funnel URL **end-to-end**: `GET https://<funnel>/api/tags` with the auth proxy's
+`OLLAMA_AUTH_TOKEN` (the Funnel's `/` route terminates at `ollama-auth-proxy`).
+After 3 consecutive failures (outside a 5-min cooldown) it escalates: restart
+tailscaled → re-assert the funnel → `tailscale funnel reset` + re-issue if
+still failing, then re-checks. State lives in `/tmp/bleep-tailscale-watchdog/`.
+
+(Historically this watchdog sent `HEALTH_CHECK_SECRET` to `/api/health` on the
+Funnel URL — that path belongs to the Ollama auth proxy, which rejects it, so it
+always 401'd and reboot-looped tailscaled every cooldown period. Keep the probe
+on `OLLAMA_AUTH_TOKEN`.)
+
+#### Watchdog: keeping the database up
+
+`sqld` itself gets `Restart=on-failure` from systemd, so hard crashes recover in
+~5s. But the DB can still be dead from the app's point of view while the process
+looks fine (hung process, missing Funnel `/sql` mount, tailnet IP change, stale
+JWT). To cover that, `bleep-db-watchdog.timer` (every 2 minutes + on boot) runs
+`scripts/db-watchdog.sh`, which issues a real authenticated `SELECT 1` against
+BOTH the box-side URL (digest worker path) and the public `/sql` Funnel URL
+(prod app path), with in-tick retries. After 2 consecutive failures it restarts
+`bleep-sqld.service` and, if needed, re-asserts the Funnel mount — verifying
+prod reachability again after each stage. Health pings never force the schema
+batch; state lives in `/tmp/bleep-db-watchdog/`. `/api/health` also reports
+`db` and returns `503` when the DB is unreachable.
 
 ### 3. Configure Vercel Environment Variables
 
@@ -106,7 +126,13 @@ OLLAMA_BASE_URL=https://bleep-ai.tailc327c1.ts.net
 OLLAMA_MODEL=qwen2.5:3b
 DATABASE_URL=https://bleep-ai.tailc327c1.ts.net/sql/
 DATABASE_AUTH_TOKEN=<sqld JWT>
+ENCRYPTION_KEY=<same value the digest worker uses>
 ```
+
+Attachment limits have working defaults (3 MB/file, 5 files/chat), so nothing is
+required to enable uploads. To change them, add e.g.
+`ATTACHMENT_MAX_FILE_BYTES=3145728`, `ATTACHMENT_MAX_FILES=5` or
+`ATTACHMENT_MAX_CHARS=40000`.
 
 ### 4. Deploy to Vercel
 
@@ -123,22 +149,28 @@ bleep-ai-chat/
 ├── src/
 │   ├── app/
 │   │   ├── api/chat/route.ts      # Ollama API proxy (streaming)
+│   │   ├── api/attachments/route.ts # Upload/extract, list, preview, delete
 │   │   ├── layout.tsx             # Root layout
 │   │   ├── page.tsx               # Main chat page
 │   │   └── globals.css            # Tailwind + theme
 │   ├── components/
 │   │   ├── ChatLayout.tsx         # Main layout (sidebar + chat)
 │   │   ├── ChatSidebar.tsx        # Chat history sidebar
-│   │   └── ChatWindow.tsx         # Chat interface with streaming
+│   │   ├── ChatWindow.tsx         # Chat interface with streaming
+│   │   ├── AttachmentPicker.tsx   # Paperclip, upload state, composer chips
+│   │   ├── AttachmentChip.tsx     # File chip + expandable text preview
 │   └── lib/
 │       ├── agent.ts               # Tool-calling loop + adaptive verbosity
+│       ├── extract.ts             # PDF/DOCX/PPTX text extraction (server-only)
+│       ├── attachments.ts         # Upload limits + validation (client-safe)
 │       ├── search.ts              # Free DuckDuckGo web search
 │       ├── store.ts               # Zustand state management
 │       └── types.ts               # TypeScript types
 ├── scripts/
 │   ├── setup-tunnel.sh            # Tailscale funnel setup
 │   ├── tunnel-watchdog.sh         # Cloudflare quick-tunnel watchdog
-│   └── tailscale-watchdog.sh      # Restarts tailscaled/funnel when prod health fails
+│   ├── tailscale-watchdog.sh      # Restarts tailscaled/funnel when prod health fails
+│   └── db-watchdog.sh             # Keeps sqld up + the prod /sql funnel reachable
 ├── .env.example                   # Environment template
 └── .env.local                     # Local config (gitignored)
 ```
@@ -146,6 +178,7 @@ bleep-ai-chat/
 ## Features
 
 - 💬 **Real-time streaming** responses from Llama
+- 📎 **Document attachments** — attach a PDF, Word doc or PowerPoint deck and the text is extracted server-side and used to ground the answer
 - 🌐 **Web-access agent** — searches (DuckDuckGo, no API key) when a question needs current information, then streams a grounded answer that cites its sources
 - ✂️ **Adaptive response length** — short answers for basic queries, detailed ones only when the question needs it
 - 🧠 **Context-aware** — history is trimmed to the selected model's context window, with a live usage ring next to the model picker
@@ -157,7 +190,40 @@ bleep-ai-chat/
 - 🗂️ **Chat history** - create, switch, delete conversations
 - ⚡ **Optimistic UI** - instant message display
 - 🔒 **Secure** - tunnel encrypts traffic, no exposed ports
-- 🔐 **Encrypted at rest** - chats, messages, digest data, usernames and prompts are AES-256-GCM encrypted in the database
+- 🔐 **Encrypted at rest** - chats, messages, digest data, usernames, attachment text and prompts are AES-256-GCM encrypted in the database
+
+## File Attachments
+
+The paperclip beside the composer takes **modern** `.pdf`, `.docx` and `.pptx`
+files (plus the `.docm`/`.dotx`/`.pptm`/`.potx`/`.ppsx` variants) — up to 5 per
+chat, 3 MB each. Files can also be dropped onto the composer.
+
+How it works:
+
+1. The browser base64-encodes the file and `POST`s it to `/api/attachments`.
+2. The server extracts the text (`unpdf` for PDF, JSZip + XML for Office Open
+   XML) and stores **only that text**, encrypted at rest alongside the rest of
+   the DB. The original file is never written to disk or the database.
+3. The text is capped at 40,000 characters per file and is trimmed further to
+   fit the selected model's context window. A file that got clipped is marked
+   **Partial** in the UI, so a truncated file can never quietly ground an answer
+   in half a document.
+4. On send, the files are bound to that user turn. They stay available as
+   context for every later message in the chat, so follow-up questions like
+   "and what about page 3?" work without re-uploading.
+
+Click a chip to see the exact text the model is reading. That matters: extraction
+is lossy for scanned PDFs (no OCR — an image-only scan yields nothing and is
+rejected) and for slide decks that are mostly text boxes or images.
+
+Legacy binary `.doc`/`.ppt` cannot be parsed and are rejected with a message
+telling you to re-save as `.docx`/`.pptx`.
+
+Limits are configurable via `ATTACHMENT_MAX_FILE_BYTES`, `ATTACHMENT_MAX_FILES`,
+`ATTACHMENT_MAX_REQUEST_BYTES` and `ATTACHMENT_MAX_CHARS` (see `.env.example`).
+The 3 MB default is deliberate: uploads travel as base64 in a JSON body, which
+inflates by ~33%, against Vercel's 4.5 MB request-body limit. Going larger needs
+direct-to-storage uploads.
 
 ## Web-Access Agent
 
@@ -209,8 +275,8 @@ otherwise answers without web context rather than failing.
 Everything sensitive is encrypted **before** it is written to the database, so a
 stolen SQLite file or a Turso dump reveals only opaque ciphertext. This covers
 chat titles, message bodies, digest payloads (emails, calendar events, Slack
-messages, Zoom recaps), daily summaries, ingest-token labels, usernames, and
-rate-limit keys. Structural columns (row ids, `user_id`, timestamps, `source`,
+messages, Zoom recaps), daily summaries, ingest-token labels, usernames,
+attachment filenames and extracted file text, and rate-limit keys. Structural columns (row ids, `user_id`, timestamps, `source`,
 `day`, `status`) stay in the clear so indexes and joins keep working; they expose
 ordering and counts, not content.
 
@@ -259,6 +325,10 @@ Update `OLLAMA_MODEL` in `.env.local` or Vercel env vars to switch models.
 |--------|----------|-------------|
 | POST   | `/api/chat` | Send messages, get streaming response |
 | GET    | `/api/chat` | List available Ollama models |
+| POST   | `/api/attachments` | Upload one or more documents (base64 JSON), extract text |
+| GET    | `/api/attachments?chatId=` | List a chat's attachments (metadata only) |
+| GET    | `/api/attachments?id=` | Read one attachment's extracted text (preview) |
+| DELETE | `/api/attachments` | Delete one attachment by id |
 
 ## Troubleshooting
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
-import type { Chat, Message, Source } from '@/lib/types';
+import type { Attachment, Chat, Message, Source } from '@/lib/types';
 import type { ChatModel } from '@/lib/models';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -24,11 +24,16 @@ interface ChatStore {
   // chat fetches its messages. These track that per-chat progress.
   messagesLoaded: Record<string, boolean>;
   messagesLoading: Record<string, boolean>;
+  // Files uploaded for each chat, newest last. Entries with no messageId are
+  // still waiting to be sent and show up as chips in the composer; the rest
+  // belong to a turn already in the thread.
+  chatAttachments: Record<string, Attachment[]>;
   // Optimistic "New Chat": a temp chat shows instantly while the POST is in
   // flight. This maps the temp id to a promise that resolves to the real id.
   pendingCreates: Record<string, Promise<string>>;
   loadChats: () => Promise<void>;
   loadMessages: (chatId: string) => Promise<void>;
+  loadAttachments: (chatId: string) => Promise<void>;
   loadModels: () => Promise<void>;
   createChat: () => Promise<string>;
   resolveChatId: (chatId: string) => Promise<string>;
@@ -41,6 +46,11 @@ interface ChatStore {
   addMessage: (chatId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message;
   updateMessage: (chatId: string, messageId: string, content: string) => void;
   updateMessageSources: (chatId: string, messageId: string, sources: Source[]) => void;
+  addAttachment: (chatId: string, attachment: Attachment) => void;
+  removeAttachment: (chatId: string, attachmentId: string) => void;
+  // Mirror the server binding a freshly-sent turn to the files that were still
+  // unbound, so the chips leave the composer and land on the message bubble.
+  bindAttachments: (chatId: string, messageId: string) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null, code?: string | null) => void;
   dismissError: () => void;
@@ -51,6 +61,9 @@ const generateTitle = (firstMessage: string): string => {
   const words = firstMessage.trim().split(/\s+/);
   return words.slice(0, 6).join(' ') + (words.length > 6 ? '...' : '');
 };
+
+// JSON always carries ISO strings; the client-facing types use Date.
+type WireAttachment = Omit<Attachment, 'createdAt'> & { createdAt: string };
 
 // Normalize API date strings into Date objects.
 function reviveChat(raw: {
@@ -64,6 +77,7 @@ function reviveChat(raw: {
     content: string;
     timestamp: string;
     sources?: { title: string; url: string }[];
+    attachments?: WireAttachment[];
   }[];
 }): Chat {
   return {
@@ -77,6 +91,9 @@ function reviveChat(raw: {
       content: m.content,
       timestamp: new Date(m.timestamp),
       ...(m.sources ? { sources: m.sources } : {}),
+      ...(m.attachments && m.attachments.length > 0
+        ? { attachments: m.attachments.map((a) => ({ ...a, createdAt: new Date(a.createdAt) })) }
+        : {}),
     })),
   };
 }
@@ -113,6 +130,7 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   chatStatus: {},
   messagesLoaded: {},
   messagesLoading: {},
+  chatAttachments: {},
   pendingCreates: {},
 
   loadModels: async () => {
@@ -165,6 +183,10 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
     set((state) => ({
       messagesLoading: { ...state.messagesLoading, [chatId]: true },
     }));
+    // Files are a separate list: the thread response only carries the ones
+    // already bound to a message, but the composer also needs files that were
+    // uploaded and not yet sent (a reload mid-compose).
+    void get().loadAttachments(chatId);
     try {
       const res = await fetch(`/api/chats/${chatId}`);
       if (!res.ok) throw new Error('Failed to load chat');
@@ -189,6 +211,23 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
       set((state) => ({
         messagesLoading: { ...state.messagesLoading, [chatId]: false },
       }));
+    }
+  },
+
+  loadAttachments: async (chatId: string) => {
+    try {
+      const res = await fetch(`/api/attachments?chatId=${encodeURIComponent(chatId)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const attachments: Attachment[] = (
+        (data.attachments ?? []) as WireAttachment[]
+      ).map((a) => ({ ...a, createdAt: new Date(a.createdAt) }));
+      set((state) => ({
+        chatAttachments: { ...state.chatAttachments, [chatId]: attachments },
+      }));
+    } catch {
+      // Attachment list is supplementary — a failure here must not break the
+      // conversation, so leave whatever is already in state.
     }
   },
 
@@ -230,6 +269,7 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
           currentChatId: state.currentChatId === tempId ? real.id : state.currentChatId,
           messagesLoaded: remap(state.messagesLoaded),
           messagesLoading: remap(state.messagesLoading),
+          chatAttachments: remap(state.chatAttachments),
           chatModels: remap(state.chatModels),
           chatStatus: remap(state.chatStatus),
           streamingChats: remap(state.streamingChats),
@@ -269,22 +309,22 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   deleteChat: async (id: string) => {
     // A temp chat that hasn't been persisted yet: just drop it locally.
     const chatId = await get().resolveChatId(id).catch(() => id);
-    if (get().pendingCreates[id] === undefined && id.startsWith('temp-')) {
-      set((state) => ({
-        chats: state.chats.filter((chat) => chat.id !== id),
-        currentChatId: state.currentChatId === id ? null : state.currentChatId,
-      }));
-      return;
-    }
-    const res = await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('Failed to delete chat');
-    set((state) => ({
+    const dropLocal = (state: ChatStore) => ({
       chats: state.chats.filter((chat) => chat.id !== chatId && chat.id !== id),
       currentChatId:
         state.currentChatId === chatId || state.currentChatId === id
           ? null
           : state.currentChatId,
-    }));
+      chatAttachments: { ...state.chatAttachments, [chatId]: [] },
+    });
+    if (get().pendingCreates[id] === undefined && id.startsWith('temp-')) {
+      set(dropLocal);
+      return;
+    }
+    const res = await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to delete chat');
+    // The server removes the chats' messages and attachments with it.
+    set(dropLocal);
   },
 
   setCurrentChat: (id: string) => {
@@ -367,6 +407,38 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
       ),
     }));
   },
+
+  addAttachment: (chatId: string, attachment: Attachment) =>
+    set((state) => {
+      const list = state.chatAttachments[chatId] ?? [];
+      // Re-uploading the same file (a retry) must not duplicate the chip.
+      if (list.some((a) => a.id === attachment.id)) return state;
+      return {
+        chatAttachments: { ...state.chatAttachments, [chatId]: [...list, attachment] },
+      };
+    }),
+
+  removeAttachment: (chatId: string, attachmentId: string) =>
+    set((state) => ({
+      chatAttachments: {
+        ...state.chatAttachments,
+        [chatId]: (state.chatAttachments[chatId] ?? []).filter(
+          (a) => a.id !== attachmentId
+        ),
+      },
+    })),
+
+  bindAttachments: (chatId: string, messageId: string) =>
+    set((state) => {
+      const list = state.chatAttachments[chatId];
+      if (!list?.some((a) => !a.messageId)) return state;
+      return {
+        chatAttachments: {
+          ...state.chatAttachments,
+          [chatId]: list.map((a) => (a.messageId ? a : { ...a, messageId })),
+        },
+      };
+    }),
 
   setLoading: (loading: boolean) => set({ isLoading: loading }),
   setError: (error: string | null, code?: string | null) =>

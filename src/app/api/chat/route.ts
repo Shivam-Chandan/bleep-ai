@@ -14,7 +14,9 @@ import { openRouterConfigured } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
 import {
   addAssistantChunk,
+  bindAttachmentsToMessage,
   getOwnedChatMeta,
+  listAttachments,
   saveAssistantSources,
   saveUserTurn,
   type ChatMessageMeta,
@@ -110,11 +112,16 @@ export async function POST(request: NextRequest) {
     // Ownership check and message stats in a single query. A null result means
     // the chat does not exist or is not owned by this user.
     let meta: ChatMessageMeta | null = null;
+    let attachments: Awaited<ReturnType<typeof listAttachments>> = [];
     if (chatId) {
       meta = await getOwnedChatMeta(auth.userId, chatId);
       if (!meta) {
         return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
       }
+      // Documents uploaded for this chat. They are re-read on every turn, so a
+      // follow-up like "now bullet-point the risks" stays grounded in the same
+      // files without the user re-attaching anything.
+      attachments = await listAttachments(auth.userId, chatId);
     }
 
     // Persist the latest user message before calling the model. Look for the
@@ -125,13 +132,20 @@ export async function POST(request: NextRequest) {
         .reverse()
         .find((m) => m.role === 'user' && m.content?.trim());
       if (lastUser && meta.lastUserContent !== lastUser.content) {
+        const messageId = randomUUID();
         // Message insert + recency (and title, on the first turn) in one batch.
         await saveUserTurn(
           chatId,
-          randomUUID(),
+          messageId,
           lastUser.content,
           meta.count === 0 ? generateTitle(lastUser.content) : undefined
         );
+        // Claim the files uploaded for this turn. Anything still unbound
+        // belongs to the message that is about to reference it, so the chips
+        // the user saw in the composer reappear on the stored message.
+        if (attachments.some((a) => !a.message_id)) {
+          await bindAttachmentsToMessage(chatId, messageId);
+        }
       }
     }
 
@@ -182,6 +196,14 @@ export async function POST(request: NextRequest) {
         contextWindow: getContextWindow(model),
         options: options as Record<string, unknown> | undefined,
         signal: genController.signal,
+        // The documents uploaded for this chat, decrypted. The agent trims
+        // them to the context window and places them next to the question.
+        attachments: attachments.map((a) => ({
+          name: a.name,
+          kind: a.kind,
+          text: a.text,
+          truncated: a.truncated,
+        })),
         // Persist + broadcast the partial answer on every streamed chunk so a
         // disconnected client can re-sync at any moment.
         onAssistantChunk: async (content) => {

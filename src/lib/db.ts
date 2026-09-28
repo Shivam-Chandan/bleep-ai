@@ -61,6 +61,28 @@ const SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at ASC)`,
+  // Documents the user attached to a chat. The file bytes are never stored —
+  // only the text pulled out of them, which is what the model actually reads.
+  // Filename and text are encrypted at rest like message bodies.
+  // `message_id` binds a file to the user turn that referenced it; it stays
+  // NULL between upload and send, and is filled in when that turn is saved.
+  `CREATE TABLE IF NOT EXISTS attachments (
+     id         TEXT PRIMARY KEY,
+     user_id    TEXT NOT NULL,
+     chat_id    TEXT NOT NULL,
+     message_id TEXT,
+     name       TEXT NOT NULL,
+     kind       TEXT NOT NULL,
+     mime       TEXT NOT NULL DEFAULT '',
+     size       INTEGER NOT NULL DEFAULT 0,
+     chars      INTEGER NOT NULL DEFAULT 0,
+     text       TEXT NOT NULL,
+     truncated  INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL,
+     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_attachments_chat
+     ON attachments(chat_id, created_at ASC)`,
   // Per-user machine tokens used by data-source integrations (Google Apps
   // Script, Slack poller) to POST into /api/ingest without a session cookie.
   // Only the SHA-256 hash of the token is stored.

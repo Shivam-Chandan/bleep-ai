@@ -9,7 +9,7 @@ import {
   normalizeUsername,
   sealUsername,
 } from './crypto.mjs';
-import type { Source } from './types';
+import type { AttachmentKind, Source } from './types';
 
 export interface UserRow {
   id: string;
@@ -73,6 +73,135 @@ function toMessageRow(r: RawMessageRow): MessageRow {
     content: String(decrypt(r.content) ?? ''),
     sources: parseSources(r.sources),
   };
+}
+
+// ---------- Attachments ----------
+
+export interface AttachmentRow {
+  id: string;
+  user_id: string;
+  chat_id: string;
+  message_id: string | null;
+  name: string;
+  kind: AttachmentKind;
+  mime: string;
+  size: number;
+  chars: number;
+  text: string;
+  truncated: boolean;
+  created_at: number;
+}
+
+// What the browser needs. Never carries `text` — the chat transcript and the
+// attachment list both ship metadata only, and the extracted body is fetched
+// on demand by the single-file preview endpoint.
+export type AttachmentMeta = Omit<AttachmentRow, 'user_id' | 'text'>;
+
+function toAttachmentRow(r: AttachmentRow): AttachmentRow {
+  return {
+    ...r,
+    name: String(decrypt(r.name) ?? ''),
+    text: String(decrypt(r.text) ?? ''),
+    truncated: Boolean(r.truncated),
+  };
+}
+
+export interface NewAttachment {
+  name: string;
+  kind: AttachmentKind;
+  mime: string;
+  size: number;
+  text: string;
+  truncated: boolean;
+}
+
+export async function createAttachments(
+  userId: string,
+  chatId: string,
+  files: NewAttachment[]
+): Promise<AttachmentRow[]> {
+  if (files.length === 0) return [];
+  const now = Date.now();
+  // One batch so N files cost a single remote round trip.
+  await batch(
+    files.map((file, i) => ({
+      sql: `INSERT INTO attachments
+              (id, user_id, chat_id, message_id, name, kind, mime, size, chars, text, truncated, created_at)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        randomUUID(),
+        userId,
+        chatId,
+        encrypt(file.name),
+        file.kind,
+        file.mime,
+        file.size,
+        file.text.length,
+        encrypt(file.text),
+        file.truncated ? 1 : 0,
+        // Offset by index so files uploaded in the same millisecond keep the
+        // order the user picked them in.
+        now + i,
+      ],
+    }))
+  );
+  return listAttachments(userId, chatId);
+}
+
+// Ownership is enforced in the WHERE clause, so an unknown or foreign chat id
+// simply yields an empty list instead of leaking existence.
+export async function listAttachments(
+  userId: string,
+  chatId: string
+): Promise<AttachmentRow[]> {
+  const rows = await select<AttachmentRow>(
+    `SELECT * FROM attachments WHERE user_id = ? AND chat_id = ?
+      ORDER BY created_at ASC, rowid ASC`,
+    [userId, chatId]
+  );
+  return rows.map(toAttachmentRow);
+}
+
+export async function getAttachment(
+  userId: string,
+  id: string
+): Promise<AttachmentRow | undefined> {
+  const rows = await select<AttachmentRow>(
+    `SELECT * FROM attachments WHERE id = ? AND user_id = ?`,
+    [id, userId]
+  );
+  const row = rows[0];
+  return row ? toAttachmentRow(row) : undefined;
+}
+
+export async function countAttachments(userId: string, chatId: string): Promise<number> {
+  const rows = await select<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM attachments WHERE user_id = ? AND chat_id = ?`,
+    [userId, chatId]
+  );
+  return rows[0]?.n ?? 0;
+}
+
+// Bind every not-yet-referenced file in the chat to the message that just
+// referenced it. Runs in the same batch as the message insert so a turn and
+// its attachments are never half-saved.
+export async function bindAttachmentsToMessage(
+  chatId: string,
+  messageId: string
+): Promise<void> {
+  await execute(
+    `UPDATE attachments SET message_id = ?
+      WHERE chat_id = ? AND message_id IS NULL`,
+    [messageId, chatId]
+  );
+}
+
+export async function deleteAttachment(userId: string, id: string): Promise<boolean> {
+  const info = await execute(`DELETE FROM attachments WHERE id = ? AND user_id = ?`, [
+    id,
+    userId,
+  ]);
+  return info.rowsAffected > 0;
 }
 
 // ---------- Users ----------
@@ -211,8 +340,9 @@ export async function touchChat(chatId: string): Promise<void> {
 
 // Delete a chat owned by `userId`. Returns false when it does not exist (or is
 // not owned), so callers get the ownership check for free instead of issuing a
-// separate SELECT. Messages are removed explicitly first because remote libSQL
-// does not enforce the ON DELETE CASCADE foreign key by default.
+// separate SELECT. Messages and attachments are removed explicitly first
+// because remote libSQL does not enforce the ON DELETE CASCADE foreign key by
+// default.
 export async function deleteChat(
   userId: string,
   chatId: string
@@ -222,7 +352,10 @@ export async function deleteChat(
     userId,
   ]);
   if (info.rowsAffected === 0) return false;
-  await execute(`DELETE FROM messages WHERE chat_id = ?`, [chatId]);
+  await batch([
+    { sql: `DELETE FROM messages WHERE chat_id = ?`, args: [chatId] },
+    { sql: `DELETE FROM attachments WHERE chat_id = ?`, args: [chatId] },
+  ]);
   return true;
 }
 

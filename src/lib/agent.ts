@@ -93,6 +93,11 @@ const SYSTEM_RESERVE_TOKENS = 512;
 // Never ask for less than this many response tokens when the window is tight.
 const MIN_RESPONSE_TOKENS = 128;
 
+// Share of the context window attachments may claim. The rest has to hold the
+// system prompt, the conversation, and the answer, and a local 7B on this box
+// only has a few thousand tokens to begin with.
+const MAX_ATTACHMENT_WINDOW_SHARE = 0.5;
+
 const DEFAULT_CONTEXT_WINDOW = 8192;
 
 // Local models run on CPU at ~1.5 tok/s, where a 2000-token "detailed" reply can
@@ -246,6 +251,88 @@ export function shouldSearchWeb(message: string): boolean {
   const q = message.trim();
   if (!q) return false;
   return SEARCH_SIGNALS.some((re) => re.test(q));
+}
+
+// ---------- Attachments ----------
+
+/**
+ * Fit a set of documents into the model's context window.
+ *
+ * The stored text is already capped per file, but several files together can
+ * still overflow a small window, so each body is trimmed to an equal share of
+ * whatever is left after the conversation and the answer. Trimming is
+ * proportional and appends a visible marker — the model is told the text was cut
+ * so it does not present a partial document as complete.
+ */
+export function fitAttachments(
+  attachments: { name: string; kind: string; text: string; truncated: boolean }[],
+  contextWindow: number,
+  reserved: {
+    systemTokens: number;
+    answerTokens: number;
+    conversationTokens: number;
+  }
+): string | null {
+  if (attachments.length === 0) return null;
+
+  const free = contextWindow - reserved.systemTokens - reserved.conversationTokens;
+  const bodyBudget = Math.max(
+    MIN_RESPONSE_TOKENS,
+    Math.min(Math.floor(contextWindow * MAX_ATTACHMENT_WINDOW_SHARE), free)
+  );
+  // Cap what we ask for so a huge answer reservation cannot starve the
+  // documents down to nothing — the user attached a file to be read.
+  const budgetChars = Math.max(500, bodyBudget * 4);
+  // The framing around each file is short but fixed; reserve it so the
+  // documents, not the labels, are what gets cut.
+  const framingChars = attachments.length * 120 + 400;
+  const perFileChars = Math.max(
+    400,
+    Math.floor((budgetChars - framingChars) / attachments.length)
+  );
+
+  const body = attachments
+    .map((file) => {
+      const limit = Math.min(file.text.length, perFileChars);
+      const cut = file.text.slice(0, limit);
+      const wasCut = cut.length < file.text.length;
+      const alreadyCut = file.truncated && !wasCut;
+      const note =
+        wasCut || alreadyCut
+          ? '\n[… this document was shortened to fit the context window …]'
+          : '';
+      return `--- file: ${file.name} (${file.kind}) ---\n${cut}${note}\n`;
+    })
+    .join('\n');
+
+  return (
+    `<documents>\n` +
+    `The user attached ${attachments.length === 1 ? 'a document' : `${attachments.length} documents`} ` +
+    `to this conversation. Answer using the content below — quote it, cite the file ` +
+    `name, and prefer it over your own assumptions. If the content does not actually ` +
+    `answer the question, say so plainly instead of inventing an answer.\n\n` +
+    `${body}</documents>`
+  );
+}
+
+/**
+ * Insert the document block as its own turn immediately before the user's
+ * question. Sitting right next to the question is what makes small local
+ * models reliably use it: the same text folded into the system prompt is
+ * routinely ignored by a 7B with a few thousand tokens of context.
+ */
+function withAttachmentContext(
+  history: AgentMessage[],
+  attachmentContext: string | null
+): AgentMessage[] {
+  if (!attachmentContext) return history;
+  const turn: AgentMessage = { role: 'user', content: attachmentContext };
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'user') {
+      return [...history.slice(0, i), turn, ...history.slice(i)];
+    }
+  }
+  return [turn, ...history];
 }
 
 // ---------- Model I/O ----------
@@ -492,6 +579,15 @@ export interface AgentResponseOptions {
   // (before any answer tokens stream), so the caller can persist them even if
   // the connection drops mid-generation.
   onAssistantSources?: (sources: Source[]) => void | Promise<void>;
+  // Text pulled out of the documents the user attached. Rendered as a turn of
+  // its own right before the question, and trimmed to whatever the context
+  // window has left after the conversation and the answer.
+  attachments?: {
+    name: string;
+    kind: string;
+    text: string;
+    truncated: boolean;
+  }[];
 }
 
 export interface PreparedResponse {
@@ -548,6 +644,20 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
   );
   const fitted = fitVerbosity(effective, contextWindow, history);
 
+  // The document block is fitted after trimming so the budget maths above sees
+  // the real conversation, and injected as its own turn so it lands directly
+  // against the question.
+  const conversationTokens = history.reduce(
+    (sum, m) => sum + estimateTokens(m.content) + 4,
+    0
+  );
+  const attachmentContext = fitAttachments(opts.attachments ?? [], contextWindow, {
+    systemTokens: SYSTEM_RESERVE_TOKENS,
+    answerTokens: fitted.maxTokens,
+    conversationTokens,
+  });
+  const modelHistory = withAttachmentContext(history, attachmentContext);
+
   // One signal that fires on user stop or client disconnect, used for every
   // upstream request so a cancelled turn releases the model immediately.
   const upstream = new AbortController();
@@ -565,8 +675,12 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
     // Fast local path. A CPU-only model runs at ~1.5 tok/s, so every extra model
     // call costs tens of seconds. Skip the tool-decision round trip entirely: a
     // cheap keyword heuristic gates search and the answer is always streamed.
+    //
+    // Attached documents win over a web search: the user gave us the source
+    // material, and on this hardware a search round trip is expensive enough
+    // that diluting the prompt with unrelated results is a bad trade.
     const lastUser = lastUserContent(history);
-    if (shouldSearchWeb(lastUser)) {
+    if (!attachmentContext && shouldSearchWeb(lastUser)) {
       mode = 'grounded';
       sources = await searchWeb(lastUser).catch(() => []);
       streamable = await callModel({
@@ -577,7 +691,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             role: 'system',
             content: `${baseSystem(fitted)}${userIntro(userName)}\n\n${formatSearchContext(sources)}`,
           },
-          ...history,
+          ...modelHistory,
         ],
         stream: true,
         contextWindow,
@@ -592,7 +706,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         model,
         messages: [
           { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
-          ...history,
+          ...modelHistory,
         ],
         stream: true,
         contextWindow,
@@ -609,16 +723,27 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
       try {
         if (attempt === 0) {
           // Decision call: tools enabled, non-streaming so tool calls arrive intact.
+          // With documents in context the bar for searching goes up — the
+          // attached files are the authority for this question.
           const res = await callModel({
             isCloud,
             model,
             messages: [
-              { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}\n\n` +
-                'Decide whether to use the web_search tool. Call it only when the answer needs ' +
-                'current, real-world, or web-based information (news, recent events, prices, live data, ' +
-                'external docs). Do NOT call it for greetings, simple math, general knowledge you are ' +
-                'confident about, or short chit-chat.' },
-              ...history,
+              {
+                role: 'system',
+                content:
+                  `${baseSystem(fitted)}${userIntro(userName)}\n\n` +
+                  (attachmentContext
+                    ? 'The user attached documents. Answer from those documents. ' +
+                      'Do NOT call web_search unless the question is explicitly about ' +
+                      'something outside the attachments (live data, external sources).\n\n'
+                    : '') +
+                  'Decide whether to use the web_search tool. Call it only when the answer needs ' +
+                  'current, real-world, or web-based information (news, recent events, prices, live data, ' +
+                  'external docs). Do NOT call it for greetings, simple math, general knowledge you are ' +
+                  'confident about, or short chit-chat.',
+              },
+              ...modelHistory,
             ],
             stream: false,
             contextWindow,
@@ -641,7 +766,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
               model,
               messages: [
                 { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
-                ...history,
+                ...modelHistory,
               ],
               stream: true,
               contextWindow,
@@ -667,7 +792,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             model,
             messages: [
               { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
-              ...history,
+              ...modelHistory,
               { role: 'assistant', content: decision.content, tool_calls: decision.toolCalls },
               toolResultMessage(isCloud, searchCall, toolResult),
             ],
@@ -689,7 +814,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           model,
           messages: [
             { role: 'system', content: systemWithContext(formatSearchContext(sources), userName) },
-            ...history,
+            ...modelHistory,
           ],
           stream: true,
           contextWindow,
@@ -760,6 +885,15 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         }
       };
       try {
+        // A local model takes tens of seconds to produce its first token; tell
+        // the user what it is doing rather than showing a bare spinner.
+        if (attachmentContext) {
+          const count = opts.attachments?.length ?? 1;
+          emit({
+            type: 'status',
+            text: `Reading ${count} attached ${count === 1 ? 'file' : 'files'}…`,
+          });
+        }
         if (mode !== 'direct') {
           // Persist the reference links before announcing them, so a client
           // that reconnects mid-generation still gets them from the DB.

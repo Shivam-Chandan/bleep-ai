@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tailscale-watchdog.sh - Restores prod -> Funnel -> Ollama reachability when it
 # breaks. The Tailscale Funnel fails in two known ways, both of which surface as
-# a failing prod /api/health (while the Funnel may still answer from the tailnet):
+# the Funnel no longer answering Ollama from the public URL (while it may still
+# answer from inside the tailnet):
 #   1. Stale control-plane/funnel state (TLS-ALPN-01 regression era) - fixed by
 #      `tailscale funnel reset` + re-issue.
 #   2. tailscaled loses its control/DERP path (e.g. an interface/gateway dies and
@@ -12,9 +13,12 @@
 # failures so a single blip doesn't restart the network stack, and a cooldown
 # prevents restart loops during prolonged outages.
 #
-# Acts only on prod's health: if the app is gated behind HEALTH_CHECK_SECRET and
-# that secret is unavailable here, it does nothing (avoids false-positive
-# tailscaled restarts against an unauthenticated health probe).
+# Health = an authenticated probe THROUGH the Funnel: GET https://<funnel>/api/tags
+# with the proxy's OLLAMA_AUTH_TOKEN. The Funnel's `/` route terminates at the
+# Ollama auth proxy (`ollama-auth-proxy.mjs`), which requires exactly that Bearer
+# token - NOT HEALTH_CHECK_SECRET. (The old probe sent HEALTH_CHECK_SECRET there
+# and got an eternal 401, which drove continuous tailscaled restarts and, through
+# the network flapping they caused, false "DB down" alarms - see db-watchdog.sh.)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,7 +29,7 @@ NEED_FAILS="${TAILSCALE_WATCHDOG_FAILS:-3}"
 COOLDOWN_SECS="${TAILSCALE_WATCHDOG_COOLDOWN:-300}"
 WAIT_TICKS="${TAILSCALE_WATCHDOG_WAIT_TICKS:-24}"   # ~72s max for tailscaled to come up
 
-# Import HEALTH_CHECK_SECRET / APP_BASE_URL without echoing values.
+# Import OLLAMA_AUTH_TOKEN / APP_BASE_URL without echoing values.
 if [ -f "$ENV_FILE" ]; then
   set -a
   # shellcheck disable=SC1090
@@ -33,8 +37,21 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-if [ -z "${HEALTH_CHECK_SECRET:-}" ]; then
-  echo "watchdog: HEALTH_CHECK_SECRET missing from $ENV_FILE; skipping"
+if [ -z "${OLLAMA_AUTH_TOKEN:-}" ]; then
+  echo "watchdog: OLLAMA_AUTH_TOKEN missing from $ENV_FILE; skipping (cannot verify the Funnel's auth proxy)"
+  exit 0
+fi
+
+FUNNEL_URL="${TAILSCALE_WATCHDOG_FUNNEL_URL:-}"
+if [ -z "$FUNNEL_URL" ]; then
+  # Buffer fully before parsing: grepping/sedding the pipe directly would SIGPIPE
+  # tailscale once the reader exits after the first match (and, under
+  # `set -o pipefail`, kill this script with 141).
+  funnel_status="$(tailscale funnel status 2>/dev/null || true)"
+  FUNNEL_URL="$(printf '%s\n' "$funnel_status" | grep -F '(Funnel on)' | head -n1 | sed -E 's#^(https?://[^ ]+).*#\1#')"
+fi
+if [ -z "$FUNNEL_URL" ]; then
+  echo "watchdog: could not resolve the Funnel URL from 'tailscale funnel status'; skipping"
   exit 0
 fi
 
@@ -56,10 +73,13 @@ restart_tailscaled() {
   fi
 }
 
+# End-to-end Funnel health: the public URL must answer the Ollama API with the
+# shared proxy token (also proves token validity, not just the socket).
 is_healthy() {
-  HEALTH_CHECK_SECRET="$HEALTH_CHECK_SECRET" \
-    APP_BASE_URL="${APP_BASE_URL:-https://bleep-ai.vercel.app}" \
-    "$REPO_DIR/scripts/check-health.sh" >/dev/null 2>&1
+  local body
+  body="$(curl -fsS --max-time 15 -H "Authorization: Bearer ${OLLAMA_AUTH_TOKEN}" \
+    "${FUNNEL_URL%/}/api/tags" 2>/dev/null || true)"
+  [ -n "$body" ]
 }
 
 # tailscaled is up once status no longer marks the node offline.
@@ -110,6 +130,9 @@ repair() {
 }
 
 mkdir -p "$STATE_DIR"
+# State dir may be created by the root timer OR a repo user running manually;
+# both must be able to update the fail counter.
+chmod 0777 "$STATE_DIR" 2>/dev/null || true
 now="$(date +%s)"
 cnt=0
 last=0

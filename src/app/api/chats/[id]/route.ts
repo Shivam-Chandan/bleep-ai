@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/auth';
-import { deleteChat, getChat, listMessages, updateChatTitle } from '@/lib/queries';
+import {
+  deleteChat,
+  getChat,
+  listAttachments,
+  listMessages,
+  updateChatTitle,
+} from '@/lib/queries';
+import type { Attachment } from '@/lib/types';
 
 // GET /api/chats/:id -> one chat with its messages. The client calls this when a
 // chat is opened so the sidebar/list request stays small and fast.
@@ -16,7 +23,34 @@ export async function GET(
   if (!chat) {
     return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
   }
-  const messages = await listMessages(id);
+  const [messages, attachments] = await Promise.all([
+    listMessages(id),
+    listAttachments(auth.userId, id),
+  ]);
+
+  // Group the files by the turn that referenced them so each bubble can show
+  // what it was grounded on. Metadata only — the extracted text is fetched
+  // separately, on demand, when the user opens the preview.
+  type WireAttachment = Omit<Attachment, 'createdAt'> & { createdAt: string };
+  const byMessage = new Map<string, WireAttachment[]>();
+  for (const row of attachments) {
+    if (!row.message_id) continue;
+    const list = byMessage.get(row.message_id) ?? [];
+    list.push({
+      id: row.id,
+      chatId: row.chat_id,
+      messageId: row.message_id,
+      name: row.name,
+      kind: row.kind,
+      mime: row.mime,
+      size: row.size,
+      chars: row.chars,
+      truncated: row.truncated,
+      createdAt: new Date(row.created_at).toISOString(),
+    });
+    byMessage.set(row.message_id, list);
+  }
+
   return NextResponse.json({
     id: chat.id,
     title: chat.title,
@@ -28,6 +62,7 @@ export async function GET(
       content: m.content,
       timestamp: new Date(m.created_at).toISOString(),
       ...(m.sources && m.sources.length > 0 ? { sources: m.sources } : {}),
+      ...(byMessage.has(m.id) ? { attachments: byMessage.get(m.id) } : {}),
     })),
   });
 }

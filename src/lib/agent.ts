@@ -3,6 +3,7 @@ import { OLLAMA_BASE_URL, OLLAMA_NUM_GPU, OLLAMA_NUM_THREAD, ollamaAuthHeader } 
 import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
 import { runSubagent } from './subagent';
+import { DELEGATE_SYSTEM, shouldDelegate } from './delegate';
 import { INTERRUPT_SUFFIX, type Source } from './types';
 import { ModelError, isAbortError, isModelError, modelFetch, type ModelErrorCode } from './modelErrors';
 import { sseEncode, SSE_HEARTBEAT } from './sse';
@@ -397,6 +398,10 @@ interface ModelCallParams {
   contextWindow: number;
   maxTokens?: number;
   tools?: ToolDefinition[];
+  // Ollama /api/chat tool_choice ('none' | 'auto' | 'required'). When the local
+  // delegation classifier fires we force 'required' so the 7B reliably emits
+  // the subagent call instead of answering the microtask itself.
+  toolChoice?: string;
   options?: Record<string, unknown>;
   signal?: AbortSignal;
 }
@@ -427,6 +432,7 @@ async function callModel(params: ModelCallParams): Promise<Response> {
     body: JSON.stringify({
       ...common,
       keep_alive: -1,
+      ...(params.toolChoice ? { tool_choice: params.toolChoice } : {}),
       options: {
         temperature: 0.9,
         top_p: 0.9,
@@ -763,13 +769,23 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
     // material, and on this hardware a search round trip is expensive enough
     // that diluting the prompt with unrelated results is a bad trade.
     const lastUser = lastUserContent(history);
+    // Deterministic delegation trigger: when the user's turn is a tiny,
+    // self-contained microtask (title/name/extract/one-liner/arithmetic), swap
+    // in the compact tool licence and FORCE the subagent call — the persona
+    // prompt otherwise suppresses tool-calling entirely. Everything else gets
+    // no tools at all (no overhead, no stray calls).
+    const delegate = shouldDelegate(lastUser);
+    const systemFor = delegate ? DELEGATE_SYSTEM : localSystem(fitted, userName);
+    const toolSetup = delegate
+      ? { tools: [SUBAGENT_TOOL] as ToolDefinition[], toolChoice: 'required' as const }
+      : { tools: undefined as ToolDefinition[] | undefined };
     if (!attachmentContext && shouldSearchWeb(lastUser)) {
       mode = 'grounded';
       sources = await searchWeb(lastUser).catch(() => []);
       const groundedMessages: AgentMessage[] = [
         {
           role: 'system',
-          content: `${localSystem(fitted, userName)}\n\n${formatSearchContext(sources)}`,
+          content: `${systemFor}\n\n${formatSearchContext(sources)}`,
         },
         ...modelHistory,
       ];
@@ -781,14 +797,14 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         stream: true,
         contextWindow,
         maxTokens: fitted.maxTokens,
-        tools: [SUBAGENT_TOOL],
+        ...toolSetup,
         options,
         signal: upstream.signal,
       });
     } else {
       mode = 'direct';
       const directMessages: AgentMessage[] = [
-        { role: 'system', content: localSystem(fitted, userName) },
+        { role: 'system', content: systemFor },
         ...modelHistory,
       ];
       localBaseMessages = directMessages;
@@ -799,7 +815,7 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
         stream: true,
         contextWindow,
         maxTokens: fitted.maxTokens,
-        tools: [SUBAGENT_TOOL],
+        ...toolSetup,
         options,
         signal: upstream.signal,
       });

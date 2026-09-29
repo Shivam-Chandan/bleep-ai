@@ -36,7 +36,7 @@ import {
 } from '@/lib/agent';
 import { runSubagent } from '@/lib/subagent';
 import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
-import { parseSseLine, SSE_CONTENT_TYPE } from '@/lib/sse';
+import { parseSseLine, sseEncode, SSE_CONTENT_TYPE } from '@/lib/sse';
 import {
   ModelError,
   isAbortError,
@@ -94,6 +94,33 @@ async function runBackgroundSubagent(chatId: string, task: string): Promise<void
 interface CollectedResponse {
   content: string;
   sources: { title: string; url: string }[];
+}
+
+// A ReadableStream that forwards `source` but emits `prefix` as its first
+// chunk. Used to deliver the chat title before the first model token.
+function prependToStream(
+  source: ReadableStream<Uint8Array>,
+  prefix: Uint8Array
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let prefixSent = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (!prefixSent) {
+        prefixSent = true;
+        controller.enqueue(prefix);
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(value);
+    },
+    cancel() {
+      void reader.cancel();
+    },
+  });
 }
 
 async function collectResponse(stream: ReadableStream<Uint8Array>): Promise<CollectedResponse> {
@@ -166,19 +193,22 @@ export async function POST(request: NextRequest) {
     // Persist the latest user message before calling the model. Look for the
     // last user turn (the client may append an empty assistant placeholder),
     // and skip if it was already saved — the client retries on 502/503/504.
+    // Kept at function scope so the title can be emitted on the response below.
+    let newTitle: string | undefined;
     if (chatId && meta) {
       const lastUser = [...messages]
         .reverse()
         .find((m) => m.role === 'user' && m.content?.trim());
       if (lastUser && meta.lastUserContent !== lastUser.content) {
         const messageId = randomUUID();
+        // The chat's title is decided exactly once — on its very first user
+        // message (meta.count === 0 was read before the insert). Later turns
+        // never touch it, and a retried send of the same content skips this
+        // block entirely.
+        newTitle =
+          meta.count === 0 ? await generateChatTitle(lastUser.content) : undefined;
         // Message insert + recency (and title, on the first turn) in one batch.
-        await saveUserTurn(
-          chatId,
-          messageId,
-          lastUser.content,
-          meta.count === 0 ? await generateChatTitle(lastUser.content) : undefined
-        );
+        await saveUserTurn(chatId, messageId, lastUser.content, newTitle);
         // Claim the files uploaded for this turn. Anything still unbound
         // belongs to the message that is about to reference it, so the chips
         // the user saw in the composer reappear on the stored message.
@@ -316,7 +346,18 @@ export async function POST(request: NextRequest) {
     }
 
     if (stream) {
-      return new NextResponse(prepared.stream, {
+      // On a chat's first turn the title is already persisted by now — deliver
+      // it as the stream's first event so the UI can display it the moment the
+      // generation starts, instead of showing a placeholder.
+      const out = newTitle
+        ? prependToStream(
+            prepared.stream,
+            new TextEncoder().encode(
+              sseEncode({ type: 'title', chatId, title: newTitle })
+            )
+          )
+        : prepared.stream;
+      return new NextResponse(out, {
         headers: {
           // text/event-stream is not compressed by Vercel/CDNs. A compressible
           // type (text/plain) gets gzipped, and gzip buffers the body — which
@@ -330,7 +371,11 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    return NextResponse.json(await collectResponse(prepared.stream));
+    const collected = await collectResponse(prepared.stream);
+    return NextResponse.json({
+      ...collected,
+      ...(newTitle ? { title: newTitle } : {}),
+    });
   } catch (error) {
     console.error('Chat API error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

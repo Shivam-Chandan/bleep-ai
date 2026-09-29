@@ -17,11 +17,15 @@ import { EventEmitter } from 'node:events';
  */
 
 export interface GenerationEvent {
-  type: 'resume' | 'content' | 'done' | 'interrupted' | 'error' | 'sources';
+  type: 'resume' | 'content' | 'done' | 'interrupted' | 'error' | 'sources' | 'title';
   active?: boolean;
   messageId?: string;
   content?: string;
   sources?: { title: string; url: string }[];
+  // The chat's title, decided on its first user message. Delivered to the
+  // client so the UI can wait for the real (sub-agent) title instead of
+  // showing a placeholder.
+  title?: string;
   message?: string;
   code?: string;
 }

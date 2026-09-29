@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/auth';
-import { getLastAssistantMessage, userOwnsChat } from '@/lib/queries';
+import { getChat, getLastAssistantMessage } from '@/lib/queries';
 import { isActive, subscribe, type GenerationEvent } from '@/lib/generation';
 import { sseEncode, SSE_CONTENT_TYPE, SSE_HEARTBEAT } from '@/lib/sse';
 
@@ -21,7 +21,8 @@ export async function GET(
   if (auth instanceof NextResponse) return auth;
 
   const { id } = await params;
-  if (!(await userOwnsChat(auth.userId, id))) {
+  const chat = await getChat(auth.userId, id);
+  if (!chat) {
     return NextResponse.json({ error: 'Chat not found' }, { status: 404 });
   }
 
@@ -63,6 +64,10 @@ export async function GET(
           ...(last?.sources && last.sources.length > 0
             ? { sources: last.sources }
             : {}),
+          // The title is already persisted (it is decided before generation
+          // starts); hand it to a reconnecting client so the sidebar/header
+          // matches the database even after a reload.
+          ...(chat.title && chat.title !== 'New Chat' ? { title: chat.title } : {}),
         });
         if (!active) {
           send({ type: 'done', messageId: last?.id });

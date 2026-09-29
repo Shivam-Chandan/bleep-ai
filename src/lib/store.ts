@@ -43,6 +43,7 @@ interface ChatStore {
   setChatModel: (chatId: string, modelId: string) => void;
   setChatStreaming: (chatId: string, streaming: boolean) => void;
   setChatStatus: (chatId: string, status: string | null) => void;
+  setChatTitle: (chatId: string, title: string) => void;
   addMessage: (chatId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message;
   updateMessage: (chatId: string, messageId: string, content: string) => void;
   updateMessageSources: (chatId: string, messageId: string, sources: Source[]) => void;
@@ -56,11 +57,6 @@ interface ChatStore {
   dismissError: () => void;
   getCurrentChat: () => Chat | undefined;
 }
-
-const generateTitle = (firstMessage: string): string => {
-  const words = firstMessage.trim().split(/\s+/);
-  return words.slice(0, 6).join(' ') + (words.length > 6 ? '...' : '');
-};
 
 // JSON always carries ISO strings; the client-facing types use Date.
 type WireAttachment = Omit<Attachment, 'createdAt'> & { createdAt: string };
@@ -352,6 +348,16 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
       chatStatus: { ...state.chatStatus, [chatId]: status },
     })),
 
+  // The real title arrives from the server as a `title` SSE event (or the
+  // resume snapshot). Only the title is touched — messages, updatedAt and the
+  // sidebar sort order stay put.
+  setChatTitle: (chatId: string, title: string) =>
+    set((state) => ({
+      chats: state.chats.map((chat) =>
+        chat.id === chatId && chat.title !== title ? { ...chat, title } : chat
+      ),
+    })),
+
   addMessage: (chatId: string, message) => {
     const newMessage: Message = {
       ...message,
@@ -365,10 +371,9 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
               ...chat,
               messages: [...chat.messages, newMessage],
               updatedAt: new Date(),
-              title:
-                chat.messages.length === 0 && message.role === 'user'
-                  ? generateTitle(message.content)
-                  : chat.title,
+              // No placeholder title: the title is decided server-side on the
+              // first user message, so the UI keeps "New Chat" until the
+              // sub-agent title arrives and setChatTitle applies it.
             }
           : chat
       ),

@@ -69,6 +69,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
   const chatStatus = useChatStore((s) => s.chatStatus);
   const setChatStreaming = useChatStore((s) => s.setChatStreaming);
   const setChatStatus = useChatStore((s) => s.setChatStatus);
+  const setChatTitle = useChatStore((s) => s.setChatTitle);
   const messagesLoading = useChatStore((s) => s.messagesLoading);
   const chatAttachments = useChatStore((s) =>
     currentChatId ? s.chatAttachments[currentChatId] : undefined
@@ -179,6 +180,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                   const parsed = parseSseLine<{
                     type?: string;
                     active?: boolean;
+                    title?: string;
                     content?: string;
                     text?: string;
                     message?: string;
@@ -193,6 +195,9 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                       setChatStreaming(chatId, true);
                       setChatStatus(chatId, 'Reconnected — the response is still generating');
                     }
+                    if (parsed.title) {
+                      setChatTitle(chatId, parsed.title);
+                    }
                     if (parsed.content) {
                       onContent(parsed.content);
                       updateMessage(chatId, targetId, parsed.content);
@@ -200,6 +205,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
                     if (parsed.sources) {
                       updateMessageSources(chatId, targetId, parsed.sources);
                     }
+                    continue;
+                  }
+                  if (parsed.type === 'title' && parsed.title) {
+                    setChatTitle(chatId, parsed.title);
                     continue;
                   }
                   if (parsed.type === 'sources' && parsed.sources) {
@@ -269,7 +278,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
       setChatStatus(chatId, 'The server is still saving this response — you can reload the page to see it.');
       return false;
     },
-    [setChatStatus, setError, setChatStreaming, updateMessage, updateMessageSources]
+    [setChatStatus, setError, setChatStreaming, setChatTitle, updateMessage, updateMessageSources]
   );
 
   // Probe once for a possibly-still-running generation when this chat loads
@@ -417,6 +426,7 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
             for (const line of lines) {
               const parsed = parseSseLine<{
                 type?: string;
+                title?: string;
                 content?: string;
                 text?: string;
                 message?: string;
@@ -427,6 +437,10 @@ export function ChatWindow({ className = '' }: ChatWindowProps) {
 
               if (parsed.type === 'status' && parsed.text) {
                 setChatStatus(chatId, parsed.text);
+                continue;
+              }
+              if (parsed.type === 'title' && parsed.title) {
+                setChatTitle(chatId, parsed.title);
                 continue;
               }
               if (parsed.type === 'sources' && parsed.sources) {

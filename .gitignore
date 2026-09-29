@@ -28,6 +28,9 @@ yarn-error.log*
 tunnel.log
 ollama.log
 
+# ad-hoc probe scripts (not app code)
+.probe/
+
 # local env files
 .env*.local
 .env

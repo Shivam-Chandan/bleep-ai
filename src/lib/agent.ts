@@ -2,6 +2,7 @@ import 'server-only';
 import { OLLAMA_BASE_URL, OLLAMA_NUM_GPU, OLLAMA_NUM_THREAD, ollamaAuthHeader } from './ollama';
 import { openRouterChatUrl, openRouterHeaders } from './openrouter';
 import { searchWeb, formatSearchContext, type SearchResult } from './search';
+import { runSubagent } from './subagent';
 import { INTERRUPT_SUFFIX, type Source } from './types';
 import { ModelError, isAbortError, isModelError, modelFetch, type ModelErrorCode } from './modelErrors';
 import { sseEncode, SSE_HEARTBEAT } from './sse';
@@ -48,6 +49,7 @@ interface Decision {
 
 interface StreamDelta {
   content?: string;
+  toolCalls?: AgentToolCall[];
   done?: boolean;
 }
 
@@ -70,6 +72,38 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
     },
   },
 };
+
+const SUBAGENT_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'subagent',
+    description:
+      'Delegate a small, self-contained task to a fast 0.5B sub-agent instead of doing it ' +
+      'in your main reply. Use for: a short title or label, naming something, extracting one ' +
+      'fact, a quick lookup, one-line summarizing, or trivial arithmetic — anything whose ' +
+      'result you can hand the user in a word or two. mode "blocking" (default) when your ' +
+      'reply depends on the result; mode "background" ONLY for fire-and-forget side tasks ' +
+      'whose result does not belong inside your reply.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'A self-contained instruction for the sub-agent.' },
+        mode: {
+          type: 'string',
+          enum: ['blocking', 'background'],
+          description:
+            '"blocking" waits for the result and you use it in your reply; "background" runs in ' +
+            'parallel and the result is delivered as a separate message.',
+        },
+      },
+      required: ['task'],
+    },
+  },
+};
+
+// How many 7B rounds a single user turn may span when it delegates to the
+// sub-agent: one round where the 7B calls the tool + one continuation round.
+const LOCAL_MAX_TOOL_ROUNDS = 2;
 
 // Hard cap on recent turns fed to the model, independent of the token budget.
 const MAX_CONTEXT_TURNS = 12;
@@ -152,6 +186,24 @@ function userIntro(userName?: string): string {
     `for a personal touch — now and then, not in every reply, and only where it feels natural, ` +
     `the way a friend would.`
   );
+}
+
+// Local models are too slow for the cloud path's decision call, so the model is
+// given a small tool licence instead: it may call `subagent` in the SAME
+// streamed call, and the orchestrator dispatches whatever it emits. The wording
+// pushes hard toward NOT delegating — a 7B on this box produces ~2 tok/s, and
+// each unnecessary delegation wastes another prompt-eval round.
+function localSystem(verbosity: VerbosityPlan, userName?: string): string {
+  const guidance =
+    `\n\nYou may call the "subagent" tool for genuinely small, self-contained tasks — a title ` +
+    `or label, naming something, extracting a single fact, a quick lookup, trivial arithmetic — ` +
+    `whose result you can hand the user in a word or two. Prefer mode "blocking" when your reply ` +
+    `depends on the result. Use mode "background" ONLY for a fire-and-forget side task whose ` +
+    `result is NOT part of your reply.\n` +
+    `Delegate only what a one-shot small model can nail. Do NOT delegate anything that needs ` +
+    `judgment, reasoning, or your own context — do that yourself. A tool call alone is never a ` +
+    `reply: you must still answer the user, weaving in whatever the sub-agent returned.`;
+  return `${baseSystem(verbosity)}${userIntro(userName)}\n${guidance}`;
 }
 
 // ---------- History trimming ----------
@@ -449,6 +501,17 @@ function parseOllamaLine(line: string): StreamDelta | null {
     const data = JSON.parse(line);
     const delta: StreamDelta = { done: data.done };
     if (data.message?.content) delta.content = data.message.content;
+    // A streamed tool call arrives intact in its own message chunk (arguments
+    // as a JSON object), then a second chunk reports done. Capture the calls so
+    // the orchestrator can dispatch them; the empty content is skipped above.
+    const rawCalls = data.message?.tool_calls as RawToolCall[] | undefined;
+    if (rawCalls?.length) {
+      delta.toolCalls = rawCalls.map((c) => ({
+        name: c?.function?.name ?? '',
+        args: parseToolArgs(c?.function?.arguments),
+        id: c?.id,
+      }));
+    }
     return delta;
   } catch {
     return null;
@@ -479,17 +542,23 @@ type Emit = (event: Record<string, unknown>) => void;
 interface StreamResult {
   content: string;
   interrupted: boolean;
+  toolCalls?: AgentToolCall[];
 }
 
 async function pipeModelStream(
   response: Response,
   isCloud: boolean,
   emit: Emit,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  // Tool-capable rounds emit their own terminal event: an intermediate 'done'
+  // would make the client finalise the message before the sub-agent result is
+  // folded back in. Set true when a continuation round may follow; the caller
+  // emits 'done' itself once the whole exchange finishes.
+  suppressDone = false
 ): Promise<StreamResult> {
   const reader = response.body?.getReader();
   if (!reader) {
-    emit({ type: 'done' });
+    if (!suppressDone) emit({ type: 'done' });
     return { content: '', interrupted: false };
   }
 
@@ -497,6 +566,7 @@ async function pipeModelStream(
   const parse = isCloud ? parseOpenRouterLine : parseOllamaLine;
   let buffer = '';
   let content = '';
+  const toolCalls: AgentToolCall[] = [];
   let finished = false;
   let interrupted = false;
 
@@ -526,6 +596,7 @@ async function pipeModelStream(
           finished = true;
           break;
         }
+        if (delta.toolCalls?.length) toolCalls.push(...delta.toolCalls);
         if (delta.content) {
           content += delta.content;
           emit({ type: 'content', content: delta.content });
@@ -549,10 +620,10 @@ async function pipeModelStream(
       );
     }
   } finally {
-    emit({ type: 'done' });
+    if (!suppressDone) emit({ type: 'done' });
     reader.releaseLock();
   }
-  return { content, interrupted };
+  return { content, interrupted, toolCalls };
 }
 
 // ---------- Agent orchestration ----------
@@ -579,6 +650,11 @@ export interface AgentResponseOptions {
   // (before any answer tokens stream), so the caller can persist them even if
   // the connection drops mid-generation.
   onAssistantSources?: (sources: Source[]) => void | Promise<void>;
+  // Fired when the model delegates a task to the sub-agent with
+  // mode="background", i.e. the result does NOT belong inside this reply. The
+  // caller runs the sub-agent and persists/delivers the result separately; the
+  // main answer stream continues without waiting for it.
+  onSubagentBackground?: (task: string) => void | Promise<void>;
   // Text pulled out of the documents the user attached. Rendered as a turn of
   // its own right before the question, and trimmed to whatever the context
   // window has left after the conversation and the answer.
@@ -670,11 +746,18 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
   let mode: 'direct' | 'grounded' | 'tool' | 'fallback' = 'direct';
   let decision: Decision = { content: '', toolCalls: [] };
   let streamable: Response | null = null;
+  // Sub-agent tool-calling (local path only): the model may call `subagent`
+  // inside the SAME streamed call; the orchestrator dispatches any tool_calls
+  // and runs a continuation round. `localBaseMessages` lets the loop rebuild
+  // later rounds with tool results appended without re-trimming history.
+  let localToolCapable = false;
+  let localBaseMessages: AgentMessage[] | null = null;
 
   if (!isCloud) {
     // Fast local path. A CPU-only model runs at ~1.5 tok/s, so every extra model
     // call costs tens of seconds. Skip the tool-decision round trip entirely: a
-    // cheap keyword heuristic gates search and the answer is always streamed.
+    // cheap keyword heuristic gates search, the single streamed call carries the
+    // subagent tool, and the answer is streamed straight through.
     //
     // Attached documents win over a web search: the user gave us the source
     // material, and on this hardware a search round trip is expensive enough
@@ -683,38 +766,45 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
     if (!attachmentContext && shouldSearchWeb(lastUser)) {
       mode = 'grounded';
       sources = await searchWeb(lastUser).catch(() => []);
+      const groundedMessages: AgentMessage[] = [
+        {
+          role: 'system',
+          content: `${localSystem(fitted, userName)}\n\n${formatSearchContext(sources)}`,
+        },
+        ...modelHistory,
+      ];
+      localBaseMessages = groundedMessages;
       streamable = await callModel({
         isCloud,
         model,
-        messages: [
-          {
-            role: 'system',
-            content: `${baseSystem(fitted)}${userIntro(userName)}\n\n${formatSearchContext(sources)}`,
-          },
-          ...modelHistory,
-        ],
+        messages: groundedMessages,
         stream: true,
         contextWindow,
         maxTokens: fitted.maxTokens,
+        tools: [SUBAGENT_TOOL],
         options,
         signal: upstream.signal,
       });
     } else {
       mode = 'direct';
+      const directMessages: AgentMessage[] = [
+        { role: 'system', content: localSystem(fitted, userName) },
+        ...modelHistory,
+      ];
+      localBaseMessages = directMessages;
       streamable = await callModel({
         isCloud,
         model,
-        messages: [
-          { role: 'system', content: `${baseSystem(fitted)}${userIntro(userName)}` },
-          ...modelHistory,
-        ],
+        messages: directMessages,
         stream: true,
         contextWindow,
         maxTokens: fitted.maxTokens,
+        tools: [SUBAGENT_TOOL],
         options,
         signal: upstream.signal,
       });
     }
+    localToolCapable = true;
   } else {
     // Cloud path: tool calling is near-instant, so let the model decide whether a
     // search is warranted, falling back to search-then-answer if tools are unsupported.
@@ -884,6 +974,87 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
           clientGone = true;
         }
       };
+      // Local sub-agent tool loop. The 7B's streamed call may contain a
+      // subagent tool call; when it does, dispatch it and run one continuation
+      // round with the tool result appended. Round streams are piped with
+      // done suppressed (an intermediate 'done' would finalise the client
+      // message), so this loop owns the terminal 'done' event.
+      const runLocalToolRounds = async (first: Response): Promise<StreamResult> => {
+        let streamable = first;
+        let working = localBaseMessages ?? [
+          { role: 'system', content: localSystem(fitted, userName) },
+          ...modelHistory,
+        ];
+        let content = '';
+        let interrupted = false;
+        let toolCalls: AgentToolCall[] = [];
+
+        for (let round = 0; round < LOCAL_MAX_TOOL_ROUNDS; round++) {
+          const res = await pipeModelStream(streamable, false, emit, upstream.signal, true);
+          content += res.content;
+          interrupted = interrupted || res.interrupted;
+          if (res.toolCalls?.length) toolCalls = res.toolCalls;
+          if (interrupted || !res.toolCalls?.length) break;
+
+          const call = res.toolCalls.find((c) => c.name === 'subagent');
+          if (!call) break; // unrecognised tool call: keep the response as-is
+
+          const task = String(call.args?.task ?? '').trim();
+          const background = String(call.args?.mode ?? 'blocking') === 'background';
+          let toolResult: string;
+
+          if (background && task) {
+            // Fire-and-forget: the caller (chat route) persists the result as a
+            // separate message. The 7B continues immediately -> parallel mode.
+            toolResult =
+              '[Background sub-agent dispatched — its result is delivered as a separate message when ready.]';
+            if (opts.onSubagentBackground) {
+              Promise.resolve(opts.onSubagentBackground(task)).catch((e: unknown) =>
+                console.error('Background sub-agent failed:', e)
+              );
+            }
+          } else if (background) {
+            toolResult = '[No task was given to the background sub-agent; skipping it.]';
+          } else {
+            // Blocking (serial) mode. The 7B paused to make the call, so it is
+            // now idle: the sub-agent runs at its full RAM speed (~20 tok/s).
+            // No contention, no queue — just run it.
+            emit({ type: 'status', text: 'Running the sub-agent…' });
+            try {
+              toolResult = await runSubagent(
+                task ||
+                  '(The sub-agent was called without a task. Read the conversation and complete the user request in one short line.)',
+                { signal: upstream.signal }
+              );
+            } catch (e) {
+              toolResult = `[Sub-agent failed: ${
+                e instanceof Error ? e.message : 'unknown error'
+              }. Answer the user yourself.]`;
+            }
+            emit({ type: 'status', text: 'Continuing…' });
+          }
+
+          working = [
+            ...working,
+            { role: 'assistant', content: '', tool_calls: res.toolCalls },
+            { role: 'tool', content: toolResult, name: call.name },
+          ];
+          streamable = await callModel({
+            isCloud: false,
+            model,
+            messages: working,
+            stream: true,
+            contextWindow,
+            maxTokens: fitted.maxTokens,
+            tools: [SUBAGENT_TOOL],
+            options,
+            signal: upstream.signal,
+          });
+        }
+
+        if (!interrupted) emit({ type: 'done' });
+        return { content, interrupted, toolCalls };
+      };
       try {
         // A local model takes tens of seconds to produce its first token; tell
         // the user what it is doing rather than showing a bare spinner.
@@ -910,7 +1081,9 @@ export async function prepareAgentResponse(opts: AgentResponseOptions): Promise<
             sources: sources.map((s) => ({ title: s.title, url: s.url })),
           });
         }
-        const result = await pipeModelStream(streamable!, isCloud, emit, upstream.signal);
+        const result = localToolCapable
+          ? await runLocalToolRounds(streamable!)
+          : await pipeModelStream(streamable!, isCloud, emit, upstream.signal);
         assistantContent = result.content;
         if (result.interrupted) {
           emit({ type: 'interrupted' });

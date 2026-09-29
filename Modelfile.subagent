@@ -1,0 +1,24 @@
+# qwen2.5:0.5b-sub — the sub-agent: a tiny, RAM-only companion model.
+#
+# Runs ENTIRELY in RAM (num_gpu 0): this 2 GB GeForce 840M is already holding the
+# resident 7B at 1475 MiB, and offloading the 0.5B to VRAM causes CUDA OOMs or evicts
+# the 7B (measured). RAM-only is what lets both models co-reside.
+#
+# Small context (1024) is the other half of co-residency: at 8192 the KV cache pushes
+# total memory past what this 7.7 GB box has free and Ollama evicts the 7B. A sub-agent
+# only ever sees ONE task at a time, so 1024 tokens is plenty.
+#
+# Low temperature: the sub-agent does determinism-first work (titles, extraction,
+# one-shot lookups) where a confident, terse answer beats creative flair.
+#
+# Apply with:
+#   ollama create qwen2.5:0.5b-sub -f Modelfile.subagent
+#
+# The 397 MB of weights are shared with qwen2.5:0.5b (FROM below) — no disk duplication.
+
+FROM qwen2.5:0.5b
+
+PARAMETER num_gpu 0
+PARAMETER num_thread 2
+PARAMETER num_ctx 1024
+PARAMETER temperature 0.4

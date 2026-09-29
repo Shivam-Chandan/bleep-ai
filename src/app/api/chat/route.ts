@@ -14,6 +14,7 @@ import { openRouterConfigured } from '@/lib/openrouter';
 import { requireSession } from '@/lib/auth';
 import {
   addAssistantChunk,
+  addMessage,
   bindAttachmentsToMessage,
   getOwnedChatMeta,
   listAttachments,
@@ -33,6 +34,7 @@ import {
   detectVerbosity,
   type AgentMessage,
 } from '@/lib/agent';
+import { runSubagent } from '@/lib/subagent';
 import { OLLAMA_BASE_URL, ollamaAuthHeader } from '@/lib/ollama';
 import { parseSseLine, SSE_CONTENT_TYPE } from '@/lib/sse';
 import {
@@ -50,6 +52,43 @@ export const maxDuration = 300;
 function generateTitle(firstMessage: string): string {
   const words = firstMessage.trim().split(/\s+/);
   return words.slice(0, 6).join(' ') + (words.length > 6 ? '...' : '');
+}
+
+// A real title from the sub-agent (fast, RAM-only, ~20 tok/s) with a hard
+// fallback to the first-6-words heuristic. The title is a nicety and must never
+// delay or fail the chat request, hence the timeout + full fallback.
+const TITLE_TIMEOUT_MS = 6000;
+const TITLE_MAX_TOKENS = 24;
+
+async function generateChatTitle(firstMessage: string): Promise<string> {
+  const fallback = generateTitle(firstMessage);
+  try {
+    const signal = AbortSignal.timeout(TITLE_TIMEOUT_MS);
+    const text = await runSubagent(
+      `Write a short title for this chat — fewer than 8 words, no quotes, no trailing punctuation, ` +
+        `plain text only: "${firstMessage.slice(0, 240)}"`,
+      { maxTokens: TITLE_MAX_TOKENS, signal }
+    );
+    const clean = text.replace(/["\n\r]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return clean.length >= 3 && clean.length <= 64 ? clean : fallback;
+  } catch (e) {
+    // Timeout, cold model, sub-agent error — the heuristic title is fine.
+    if (!isAbortError(e)) console.warn('Sub-agent title failed, using heuristic:', e);
+    return fallback;
+  }
+}
+
+// Fire-and-forget run of a background sub-agent task: the result is persisted
+// as its own assistant message so nothing downstream races the main reply.
+async function runBackgroundSubagent(chatId: string, task: string): Promise<void> {
+  try {
+    const result = await runSubagent(task);
+    if (result.trim()) {
+      await addMessage(chatId, 'assistant', `*Sub-agent:* ${result}`);
+    }
+  } catch (e) {
+    console.warn('Background sub-agent failed:', e);
+  }
 }
 
 interface CollectedResponse {
@@ -138,7 +177,7 @@ export async function POST(request: NextRequest) {
           chatId,
           messageId,
           lastUser.content,
-          meta.count === 0 ? generateTitle(lastUser.content) : undefined
+          meta.count === 0 ? await generateChatTitle(lastUser.content) : undefined
         );
         // Claim the files uploaded for this turn. Anything still unbound
         // belongs to the message that is about to reference it, so the chips
@@ -248,6 +287,12 @@ export async function POST(request: NextRequest) {
             messageId: answerId,
             sources,
           });
+        },
+        // Sub-agent delegated in background mode: run it without blocking the
+        // 7B's reply and persist the result as its own assistant message.
+        onSubagentBackground: (task) => {
+          if (!chatId) return Promise.resolve();
+          return runBackgroundSubagent(chatId, task);
         },
       });
     } catch (error) {
